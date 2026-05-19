@@ -12,7 +12,7 @@ import type { OrderedCSSStyleSheet } from './createOrderedCSSStyleSheet';
  *
  * The pipeline the consumer is expected to use, per chunk:
  *
- *   <style data-rnw-delta="N">[stylesheet-group="2"]{} .r-foo {...}</style>
+ *   <style data-rnw-delta="N">@layer rnw-2 { .r-foo {...} }</style>
  *   <script>
  *     (window.__RNW_DELTA__ = window.__RNW_DELTA__ || []).push("N");
  *     if (window.__RNW_INGEST_DELTA__) window.__RNW_INGEST_DELTA__();
@@ -23,6 +23,8 @@ import type { OrderedCSSStyleSheet } from './createOrderedCSSStyleSheet';
  * signal: it tells RNW that the rule is already present in the document
  * so a later StyleSheet.create call for the same atomic class can dedup
  * instead of re-inserting a duplicate into the primary sheet at runtime.
+ * Cross-sheet cascade ordering is handled by the named layers themselves;
+ * the bookkeeping transfer is purely a runtime-dedup optimization.
  *
  * If the inline script runs before RNW's runtime has installed
  * __RNW_INGEST_DELTA__, the ID stays in the queue; RNW drains the queue
@@ -42,17 +44,29 @@ const QUEUE_KEY = '__RNW_DELTA__';
 const HOOK_KEY = '__RNW_INGEST_DELTA__';
 
 const slice = Array.prototype.slice;
-const groupSplitPattern = /["']/g;
 
-function decodeGroupRule(cssRule: CSSStyleRule): ?number {
-  // Marker rules look like `[stylesheet-group="N"]{}`. Pull N out of the
-  // selector text in a way that tolerates either quote style.
-  const selector = cssRule.selectorText;
-  if (selector == null) return null;
-  const parts = selector.split(groupSplitPattern);
-  if (parts.length < 2) return null;
-  const n = Number(parts[1]);
+// Decode `rnw-X` or `rnw-X-Y` → X or X.Y. Returns null on malformed input.
+function groupForLayerName(name: ?string): ?number {
+  if (name == null || name.indexOf('rnw-') !== 0) return null;
+  const rest = name.slice(4);
+  if (rest === '') return null;
+  const n = Number(rest.replace(/-/g, '.'));
   return isFinite(n) ? n : null;
+}
+
+// Extract the group number from a `@layer rnw-N { … }` CSSLayerBlockRule.
+function decodeLayerBlockGroup(cssRule: {
+  cssText: string,
+  name?: string
+}): ?number {
+  if (typeof cssRule.name === 'string') {
+    return groupForLayerName(cssRule.name);
+  }
+  const cssText = cssRule.cssText;
+  if (cssText == null || cssText.indexOf('@layer ') !== 0) return null;
+  const match = cssText.match(/^@layer\s+([\w-]+)\s*\{/);
+  if (match == null) return null;
+  return groupForLayerName(match[1]);
 }
 
 /**
@@ -85,16 +99,18 @@ export function installDeltaIngest(
     const cssSheet: ?CSSStyleSheet = element.sheet;
     if (cssSheet == null) return;
 
-    let currentGroup: ?number = null;
     slice.call(cssSheet.cssRules).forEach((cssRule) => {
-      const cssText = cssRule.cssText;
-      if (cssText.indexOf('stylesheet-group') > -1) {
-        currentGroup = decodeGroupRule(cssRule);
-      } else if (currentGroup != null) {
+      const group = decodeLayerBlockGroup(cssRule);
+      if (group == null) return;
+      // CSSLayerBlockRule extends CSSGroupingRule which exposes .cssRules.
+      const innerRules = cssRule.cssRules;
+      if (innerRules == null) return;
+      slice.call(innerRules).forEach((innerRule) => {
+        const innerText = innerRule.cssText;
         sheets.forEach((s) => {
-          s.registerExisting(cssText, currentGroup);
+          s.registerExisting(innerText, group);
         });
-      }
+      });
     });
   }
 

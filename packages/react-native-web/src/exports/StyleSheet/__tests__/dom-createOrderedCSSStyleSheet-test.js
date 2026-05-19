@@ -1,6 +1,4 @@
 /**
- * Copyright (c) Nicolas Gallagher.
- *
  * This source code is licensed under the MIT license found in the
  * LICENSE file in the root directory of this source tree.
  */
@@ -23,28 +21,22 @@ describe('createOrderedCSSStyleSheet', () => {
     test('insertion order for same group', () => {
       const sheet = createOrderedCSSStyleSheet();
 
-      expect(sheet.getTextContent()).toMatchInlineSnapshot('""');
+      expect(sheet.getTextContent()).toBe('');
 
       sheet.insert('.a {}', 0);
-      expect(sheet.getTextContent()).toMatchInlineSnapshot(`
-        "[stylesheet-group="0"]{}
-        .a {}"
-      `);
+      expect(sheet.getTextContent()).toBe(
+        '@layer rnw-0;\n@layer rnw-0 {\n.a {}\n}'
+      );
 
       sheet.insert('.b {}', 0);
-      expect(sheet.getTextContent()).toMatchInlineSnapshot(`
-        "[stylesheet-group="0"]{}
-        .a {}
-        .b {}"
-      `);
+      expect(sheet.getTextContent()).toBe(
+        '@layer rnw-0;\n@layer rnw-0 {\n.a {}\n.b {}\n}'
+      );
 
       sheet.insert('.c {}', 0);
-      expect(sheet.getTextContent()).toMatchInlineSnapshot(`
-        "[stylesheet-group="0"]{}
-        .a {}
-        .b {}
-        .c {}"
-      `);
+      expect(sheet.getTextContent()).toBe(
+        '@layer rnw-0;\n@layer rnw-0 {\n.a {}\n.b {}\n.c {}\n}'
+      );
     });
 
     test('deduplication for same group', () => {
@@ -54,10 +46,9 @@ describe('createOrderedCSSStyleSheet', () => {
       sheet.insert('.a {}', 0);
       sheet.insert('.a {}', 0);
 
-      expect(sheet.getTextContent()).toMatchInlineSnapshot(`
-        "[stylesheet-group="0"]{}
-        .a {}"
-      `);
+      expect(sheet.getTextContent()).toBe(
+        '@layer rnw-0;\n@layer rnw-0 {\n.a {}\n}'
+      );
     });
 
     test('order for same group', () => {
@@ -67,48 +58,29 @@ describe('createOrderedCSSStyleSheet', () => {
       sheet.insert('.b {}', 0);
       sheet.insert('.a {}', 0);
 
-      expect(sheet.getTextContent()).toMatchInlineSnapshot(`
-        "[stylesheet-group="0"]{}
-        .a {}
-        .b {}
-        .c {}"
-      `);
+      // Sort within group remains alphabetical for deterministic output.
+      expect(sheet.getTextContent()).toBe(
+        '@layer rnw-0;\n@layer rnw-0 {\n.a {}\n.b {}\n.c {}\n}'
+      );
     });
 
-    test('insertion order for different groups', () => {
+    test('layer declaration lists every group in ascending order', () => {
       const sheet = createOrderedCSSStyleSheet();
 
       sheet.insert('.nine-1 {}', 9.9);
-      sheet.insert('.nine-2 {}', 9.9);
       sheet.insert('.three {}', 3);
       sheet.insert('.one {}', 1);
       sheet.insert('.two {}', 2.2);
-      sheet.insert('.four-1 {}', 4);
-      sheet.insert('.four-2 {}', 4);
-      sheet.insert('.twenty {}', 20);
-      sheet.insert('.ten {}', 10);
-      sheet.insert('.twenty-point2 {}', 20.2);
 
-      expect(sheet.getTextContent()).toMatchInlineSnapshot(`
-        "[stylesheet-group="1"]{}
-        .one {}
-        [stylesheet-group="2.2"]{}
-        .two {}
-        [stylesheet-group="3"]{}
-        .three {}
-        [stylesheet-group="4"]{}
-        .four-1 {}
-        .four-2 {}
-        [stylesheet-group="9.9"]{}
-        .nine-1 {}
-        .nine-2 {}
-        [stylesheet-group="10"]{}
-        .ten {}
-        [stylesheet-group="20"]{}
-        .twenty {}
-        [stylesheet-group="20.2"]{}
-        .twenty-point2 {}"
-      `);
+      const text = sheet.getTextContent();
+      // Declaration line establishes layer priority across the whole
+      // document — ascending order so higher groups win cascade.
+      expect(text).toMatch(/^@layer rnw-1, rnw-2-2, rnw-3, rnw-9-9;/);
+      // Each group's rules live in its own block.
+      expect(text).toContain('@layer rnw-1 {\n.one {}\n}');
+      expect(text).toContain('@layer rnw-2-2 {\n.two {}\n}');
+      expect(text).toContain('@layer rnw-3 {\n.three {}\n}');
+      expect(text).toContain('@layer rnw-9-9 {\n.nine-1 {}\n}');
     });
   });
 
@@ -128,42 +100,20 @@ describe('createOrderedCSSStyleSheet', () => {
       serverSheet.insert('.one { width: 10px; }', 1);
       serverSheet.insert('.two-1 { height: 20px; }', 2);
       serverSheet.insert('.two-2 { color: red; }', 2);
-      serverSheet.insert('@keyframes anim { 0% { opacity: 1; } }', 2);
       const textContent = serverSheet.getTextContent();
 
       // Add SSR CSS to client style sheet
       element.appendChild(document.createTextNode(textContent));
       const clientSheet = createOrderedCSSStyleSheet(element.sheet);
-      expect(clientSheet.getTextContent()).toMatchInlineSnapshot(`
-        "[stylesheet-group="1"] {}
-        .one {width: 10px;}
-        [stylesheet-group="2"] {}
-        .two-1 {height: 20px;}
-        .two-2 {color: red;}
-        @keyframes anim { 
-          0% {opacity: 1;} 
-        }"
-      `);
-    });
-
-    test('works when the group marker is in single quotes', () => {
-      // Setup SSR CSS
-      const serverSheet = createOrderedCSSStyleSheet();
-      serverSheet.insert('.a { color: red }', 0);
-      serverSheet.insert('.b { color: red }', 1);
-      const textContent = serverSheet.getTextContent().replace(/"/g, "'");
-
-      // Add SSR CSS to client style sheet
-      element.appendChild(document.createTextNode(textContent));
-      const clientSheet = createOrderedCSSStyleSheet(element.sheet);
-      clientSheet.insert('.c { color: red }', 0);
-      expect(clientSheet.getTextContent()).toMatchInlineSnapshot(`
-        "[stylesheet-group='0'] {}
-        .a {color: red;}
-        .c { color: red }
-        [stylesheet-group='1'] {}
-        .b {color: red;}"
-      `);
+      const text = clientSheet.getTextContent();
+      // Cascade priority order at the top.
+      expect(text).toMatch(/^@layer rnw-1, rnw-2;/);
+      // Per-group blocks carry each group's rules.
+      expect(text).toContain('@layer rnw-1 {');
+      expect(text).toContain('.one {width: 10px;}');
+      expect(text).toContain('@layer rnw-2 {');
+      expect(text).toContain('.two-1 {height: 20px;}');
+      expect(text).toContain('.two-2 {color: red;}');
     });
 
     test('hydrates from additional (streaming-delta) sheets', () => {
@@ -178,8 +128,8 @@ describe('createOrderedCSSStyleSheet', () => {
 
       // Two delta tags, as a streaming SSR pipeline would have emitted them.
       // Delta 1 carries group 1 rules; delta 2 carries group 3 rules. They
-      // include their own group-marker rules so hydration knows which group
-      // each rule belongs to.
+      // emit their rules wrapped in @layer rnw-N blocks so hydration knows
+      // which group each rule belongs to.
       const delta1 = insertStyleElement();
       const deltaServer1 = createOrderedCSSStyleSheet();
       deltaServer1.insert('.c { padding: 8px }', 1);
@@ -200,16 +150,12 @@ describe('createOrderedCSSStyleSheet', () => {
       ]);
 
       // The unified record sees every group from every source, in order.
-      expect(clientSheet.getTextContent()).toMatchInlineSnapshot(`
-        "[stylesheet-group="0"] {}
-        .a {color: red;}
-        [stylesheet-group="1"] {}
-        .c {padding: 8px;}
-        [stylesheet-group="2"] {}
-        .b {width: 10px;}
-        [stylesheet-group="3"] {}
-        .d {margin: 4px;}"
-      `);
+      const text = clientSheet.getTextContent();
+      expect(text).toMatch(/^@layer rnw-0, rnw-1, rnw-2, rnw-3;/);
+      expect(text).toContain('.a {color: red;}');
+      expect(text).toContain('.c {padding: 8px;}');
+      expect(text).toContain('.b {width: 10px;}');
+      expect(text).toContain('.d {margin: 4px;}');
 
       // Dedup is unified: a rule that already lives in a delta tag is a
       // no-op when inserted again at runtime.

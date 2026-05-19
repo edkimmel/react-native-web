@@ -68,3 +68,14 @@ export { default as DeviceEventEmitter } from './exports/DeviceEventEmitter';
 export { default as useColorScheme } from './exports/useColorScheme';
 export { default as useLocaleContext } from './exports/useLocaleContext';
 export { default as useWindowDimensions } from './exports/useWindowDimensions';
+
+// SSR per-request scoping. Server entrypoints wrap each render in
+// `runInRequestScope` so module-level state inside RNW (the cumulative
+// StyleSheet, the per-request delta buffer) is isolated per request.
+// `getScopedState` and `hasRequestScope` let downstream SSR helpers
+// register their own per-request state behind the same scope.
+export {
+  getScopedState,
+  hasRequestScope,
+  runInRequestScope
+} from './modules/asyncContext';

@@ -34,18 +34,11 @@ const REQUEST_DELTA_KEY = 'StyleSheet.delta';
 
 type RequestDelta = {|
   // Rules added in insertion order, bucketed by group number.
-  pending: Map<number, Array<string>>,
-  // Groups for which a `[stylesheet-group="N"]{}` marker rule has already
-  // been emitted in a prior flush during this request. Subsequent flushes
-  // skip the marker for these groups; only the new content is emitted.
-  emittedGroupMarkers: Set<number>
+  pending: Map<number, Array<string>>
 |};
 
 function createRequestDelta(): RequestDelta {
-  return {
-    emittedGroupMarkers: new Set(),
-    pending: new Map()
-  };
+  return { pending: new Map() };
 }
 
 function appendRequestDelta(cssText: string, groupValue: number): void {
@@ -63,8 +56,11 @@ function appendRequestDelta(cssText: string, groupValue: number): void {
   bucket.push(cssText);
 }
 
-function encodeGroupMarker(group: number): string {
-  return `[stylesheet-group="${group}"]{}`;
+// Encode a group number as a CSS layer name. Mirrors the helper in
+// dom/createOrderedCSSStyleSheet.js; kept inline here to avoid coupling
+// the API export to a sub-module path.
+function layerNameForGroup(group: number): string {
+  return `rnw-${String(group).replace('.', '-')}`;
 }
 
 /**
@@ -73,9 +69,11 @@ function encodeGroupMarker(group: number): string {
  * streamed response. Returns an empty string if there is no active request
  * scope or no pending rules.
  *
- * Each group present in the delta is preceded by its `[stylesheet-group="N"]`
- * marker rule the first time it appears for the request; subsequent flushes
- * skip the marker because the client already knows the group exists.
+ * Output uses CSS Cascade Layers — one `@layer rnw-<group> { … }` block per
+ * group that has pending rules. Layer ordering is established by the shell
+ * head dump's `@layer …;` declaration; subsequent deltas don't need to
+ * re-declare. Re-emitting a layer block for an already-declared layer is
+ * idempotent — the browser merges the rules into the same cascade tier.
  */
 function takeRequestDelta(): string {
   if (!hasRequestScope()) return '';
@@ -88,20 +86,16 @@ function takeRequestDelta(): string {
   const orderedGroups = Array.from(delta.pending.keys()).sort((a, b) =>
     a > b ? 1 : -1
   );
-  const out = [];
+  const blocks = [];
   for (const group of orderedGroups) {
     const bucket = delta.pending.get(group);
     if (bucket == null || bucket.length === 0) continue;
-    if (!delta.emittedGroupMarkers.has(group)) {
-      out.push(encodeGroupMarker(group));
-      delta.emittedGroupMarkers.add(group);
-    }
-    for (const rule of bucket) {
-      out.push(rule);
-    }
+    blocks.push(
+      `@layer ${layerNameForGroup(group)} {\n${bucket.join('\n')}\n}`
+    );
   }
   delta.pending.clear();
-  return out.join('\n');
+  return blocks.join('\n');
 }
 
 /**
@@ -117,23 +111,94 @@ function resetRequestDelta(): void {
     createRequestDelta
   );
   delta.pending.clear();
-  // Note: we do not reset emittedGroupMarkers — once a marker has been emitted
-  // for the request (e.g. inline in the shell dump's text), subsequent chunks
-  // should not re-emit it.
+}
+
+// ---------------------------------------------------------------------------
+// SSR injection helpers
+//
+// Higher-level helpers that return ready-to-inline HTML fragments. SSR
+// adapters call these and embed the strings verbatim into the response.
+// Adapters do NOT need to know:
+//   - that the shell goes into `<style id="react-native-stylesheet">`
+//   - that streamed chunks use `<style data-rnw-delta="N">` + an inline
+//     `<script>` handshake
+//   - what the handshake script contains, or the names of any window
+//     globals it touches
+// Those details are opaque to callers and may change without affecting
+// adapter code, provided the produced HTML is treated as a single
+// inert blob.
+// ---------------------------------------------------------------------------
+
+const REQUEST_SEQ_KEY = 'StyleSheet.delta-seq';
+
+function nextDeltaSeq(): number {
+  // When called outside any request scope the counter falls back to a
+  // single process-wide one; the sequence is purely a uniqueness handle
+  // for the embedded handshake script and doesn't need cross-request
+  // semantics in that mode.
+  const counter = hasRequestScope()
+    ? getScopedState<{ value: number }>(REQUEST_SEQ_KEY, () => ({ value: 0 }))
+    : processWideSeq;
+  counter.value += 1;
+  return counter.value;
+}
+
+const processWideSeq: { value: number } = { value: 0 };
+
+// Escape `</style` so a rule containing it can't break out of the
+// surrounding <style> tag. Atomic rules don't contain this in practice
+// but it's cheap to be safe.
+function escapeForStyleTag(css: string): string {
+  return css.replace(/<\/style/gi, '<\\/style');
 }
 
 /**
- * Pre-mark groups whose markers are already present in the shell head dump
- * so subsequent delta flushes don't emit duplicate markers for them. Called
- * by the streaming pipeline immediately after rendering the shell.
+ * Return the HTML fragment that carries the full cumulative server sheet,
+ * ready to inline anywhere the adapter wants (typically right before
+ * `</head>`). Also resets the per-request delta buffer — anything that
+ * was dual-written during the shell render is already in the dump, so
+ * subsequent streaming chunks should only carry rules added AFTER this
+ * point.
+ *
+ * The returned fragment is the primary RNW stylesheet element; client
+ * runtime will adopt it on boot and append to it via insertRule. This
+ * keeps shell rules and runtime additions inside the same CSSOM, which
+ * is the only place CSS Cascade Layer ordering is reliable.
+ *
+ * Returns '' if there are no rules to emit.
  */
-function markGroupsAsEmitted(groupNumbers: $ReadOnlyArray<number>): void {
-  if (!hasRequestScope()) return;
-  const delta = getScopedState<RequestDelta>(
-    REQUEST_DELTA_KEY,
-    createRequestDelta
-  );
-  for (const g of groupNumbers) delta.emittedGroupMarkers.add(g);
+function takeShellHTML(): string {
+  const { textContent } = getSheet();
+  resetRequestDelta();
+  if (!textContent) return '';
+  return `<style id="react-native-stylesheet">${escapeForStyleTag(
+    textContent
+  )}</style>`;
+}
+
+/**
+ * Return the HTML fragment for a streamed post-shell chunk: the rules
+ * that landed in the current request since the last `takeShellHTML` /
+ * `takeDeltaHTML` call, plus a tiny inline handshake script that tells
+ * the runtime to learn about them.
+ *
+ * Adapters embed this verbatim at chunk boundaries. The internals of
+ * the script — what window globals it touches, how it coordinates with
+ * the runtime — are intentionally opaque.
+ *
+ * Returns '' if the buffer is empty (no new rules this chunk).
+ */
+function takeDeltaHTML(): string {
+  const delta = takeRequestDelta();
+  if (!delta) return '';
+  const seq = nextDeltaSeq();
+  const styleTag = `<style data-rnw-delta="${seq}">${escapeForStyleTag(
+    delta
+  )}</style>`;
+  const handshake =
+    `<script>(window.__RNW_DELTA__=window.__RNW_DELTA__||[]).push("${seq}");` +
+    `if(window.__RNW_INGEST_DELTA__)window.__RNW_INGEST_DELTA__();</script>`;
+  return styleTag + handshake;
 }
 
 const defaultPreprocessOptions = { shadow: true, textShadow: true };
@@ -300,7 +365,8 @@ StyleSheet.flatten = flatten;
 StyleSheet.getSheet = getSheet;
 StyleSheet.takeRequestDelta = takeRequestDelta;
 StyleSheet.resetRequestDelta = resetRequestDelta;
-StyleSheet.markGroupsAsEmitted = markGroupsAsEmitted;
+StyleSheet.takeShellHTML = takeShellHTML;
+StyleSheet.takeDeltaHTML = takeDeltaHTML;
 // `hairlineWidth` is not implemented using screen density as browsers may
 // round sub-pixel values down to `0`, causing the line not to be rendered.
 StyleSheet.hairlineWidth = 1;
@@ -319,7 +385,8 @@ export type IStyleSheet = {
   getSheet: typeof getSheet,
   takeRequestDelta: typeof takeRequestDelta,
   resetRequestDelta: typeof resetRequestDelta,
-  markGroupsAsEmitted: typeof markGroupsAsEmitted,
+  takeShellHTML: typeof takeShellHTML,
+  takeDeltaHTML: typeof takeDeltaHTML,
   hairlineWidth: number
 };
 

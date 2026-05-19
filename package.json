@@ -61,7 +61,8 @@
   },
   "workspaces": [
     "packages/react-native-web",
-    "packages/*"
+    "packages/babel-plugin-react-native-web",
+    "packages/dom-event-testing-library"
   ],
   "husky": {
     "hooks": {
