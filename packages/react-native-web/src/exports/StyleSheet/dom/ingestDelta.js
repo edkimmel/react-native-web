@@ -12,19 +12,22 @@ import type { OrderedCSSStyleSheet } from './createOrderedCSSStyleSheet';
  *
  * The pipeline the consumer is expected to use, per chunk:
  *
- *   <style data-rnw-delta="N">@layer rnw-2 { .r-foo {...} }</style>
+ *   <style data-rnw-group="2" data-rnw-delta="N">.r-foo {...}</style>
  *   <script>
+ *     // relocate the style into <head>, after its group anchor
  *     (window.__RNW_DELTA__ = window.__RNW_DELTA__ || []).push("N");
  *     if (window.__RNW_INGEST_DELTA__) window.__RNW_INGEST_DELTA__();
  *   </script>
  *
  * The browser applies the `<style data-rnw-delta>` rules immediately — that
- * is the no-FOUC guarantee. The inline script is *only* a bookkeeping
- * signal: it tells RNW that the rule is already present in the document
- * so a later StyleSheet.create call for the same atomic class can dedup
- * instead of re-inserting a duplicate into the primary sheet at runtime.
- * Cross-sheet cascade ordering is handled by the named layers themselves;
- * the bookkeeping transfer is purely a runtime-dedup optimization.
+ * is the no-FOUC guarantee — and the inline script's relocation step is
+ * what puts them in the right place in the cascade, synchronously at parse
+ * time. Neither depends on RNW's runtime having loaded.
+ *
+ * This hook is *only* a bookkeeping signal: it tells RNW that the rule is
+ * already present in the document so a later StyleSheet.create call for the
+ * same atomic class can dedup instead of re-inserting a duplicate at
+ * runtime.
  *
  * If the inline script runs before RNW's runtime has installed
  * __RNW_INGEST_DELTA__, the ID stays in the queue; RNW drains the queue
@@ -44,29 +47,24 @@ const QUEUE_KEY = '__RNW_DELTA__';
 const HOOK_KEY = '__RNW_INGEST_DELTA__';
 
 const slice = Array.prototype.slice;
+const groupSplitPattern = /["']/g;
 
-// Decode `rnw-X` or `rnw-X-Y` → X or X.Y. Returns null on malformed input.
-function groupForLayerName(name: ?string): ?number {
-  if (name == null || name.indexOf('rnw-') !== 0) return null;
-  const rest = name.slice(4);
-  if (rest === '') return null;
-  const n = Number(rest.replace(/-/g, '.'));
-  return isFinite(n) ? n : null;
+function readGroupAttr(element: Element): ?number {
+  const raw = element.getAttribute('data-rnw-group');
+  if (raw == null || raw === '') return null;
+  const group = Number(raw);
+  return isFinite(group) ? group : null;
 }
 
-// Extract the group number from a `@layer rnw-N { … }` CSSLayerBlockRule.
-function decodeLayerBlockGroup(cssRule: {
-  cssText: string,
-  name?: string
-}): ?number {
-  if (typeof cssRule.name === 'string') {
-    return groupForLayerName(cssRule.name);
-  }
-  const cssText = cssRule.cssText;
-  if (cssText == null || cssText.indexOf('@layer ') !== 0) return null;
-  const match = cssText.match(/^@layer\s+([\w-]+)\s*\{/);
-  if (match == null) return null;
-  return groupForLayerName(match[1]);
+function decodeGroupRule(cssRule: CSSStyleRule): ?number {
+  // Marker rules look like `[stylesheet-group="N"]{}`. Pull N out of the
+  // selector text in a way that tolerates either quote style.
+  const selector = cssRule.selectorText;
+  if (selector == null) return null;
+  const parts = selector.split(groupSplitPattern);
+  if (parts.length < 2) return null;
+  const n = Number(parts[1]);
+  return isFinite(n) ? n : null;
 }
 
 /**
@@ -99,18 +97,37 @@ export function installDeltaIngest(
     const cssSheet: ?CSSStyleSheet = element.sheet;
     if (cssSheet == null) return;
 
-    slice.call(cssSheet.cssRules).forEach((cssRule) => {
-      const group = decodeLayerBlockGroup(cssRule);
-      if (group == null) return;
-      // CSSLayerBlockRule extends CSSGroupingRule which exposes .cssRules.
-      const innerRules = cssRule.cssRules;
-      if (innerRules == null) return;
-      slice.call(innerRules).forEach((innerRule) => {
-        const innerText = innerRule.cssText;
+    const rules = slice.call(cssSheet.cssRules);
+
+    // Grouped format: the element carries its own group, so every rule in
+    // it belongs to that group and there is nothing to scan for.
+    const attrGroup = readGroupAttr(element);
+    if (attrGroup != null) {
+      rules.forEach((cssRule) => {
+        const cssText = cssRule.cssText;
+        if (cssText.indexOf('stylesheet-group') > -1) return;
         sheets.forEach((s) => {
-          s.registerExisting(innerText, group);
+          s.registerExisting(cssText, attrGroup);
         });
       });
+      return;
+    }
+
+    // Legacy format: groups are delimited by `[stylesheet-group="N"]{}`
+    // marker rules inside the delta's own text.
+    let currentGroup: ?number = null;
+    rules.forEach((cssRule) => {
+      const cssText = cssRule.cssText;
+      if (cssText.indexOf('stylesheet-group') > -1) {
+        currentGroup = decodeGroupRule(cssRule);
+      } else if (currentGroup != null) {
+        // Copy to a const: Flow drops the null-refinement of the outer `let`
+        // once it crosses into the callback.
+        const group = currentGroup;
+        sheets.forEach((s) => {
+          s.registerExisting(cssText, group);
+        });
+      }
     });
   }
 

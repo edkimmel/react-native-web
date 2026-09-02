@@ -40,9 +40,8 @@ describe('StyleSheet per-request delta', () => {
       StyleSheet.resetRequestDelta();
       StyleSheet.create({ a: makeStyle() });
       const delta = StyleSheet.takeRequestDelta();
-      // Sanity: the delta wraps the rule in an `@layer rnw-<group> { … }`
-      // block so the client merges it into the right cascade tier.
-      expect(delta).toMatch(/@layer rnw-[\w-]+ \{/);
+      // Sanity: the delta contains at least one rule plus a marker.
+      expect(delta).toContain('[stylesheet-group="');
       expect(delta).toMatch(/\.r-[^ ]+ ?\{/);
     });
   });
@@ -58,21 +57,21 @@ describe('StyleSheet per-request delta', () => {
     });
   });
 
-  test('each flush wraps its rules in a fresh @layer block', () => {
+  test('a group marker is emitted only on the first flush per request', () => {
     runInRequestScope(() => {
       StyleSheet.resetRequestDelta();
       StyleSheet.create({ a: makeStyle() });
       const first = StyleSheet.takeRequestDelta();
-      expect(first).toMatch(/@layer rnw-[\w-]+ \{/);
+      const firstMarkerCount = (first.match(/\[stylesheet-group="/g) || [])
+        .length;
+      expect(firstMarkerCount).toBeGreaterThan(0);
 
-      // A second flush in the same request also emits `@layer` blocks for
-      // its own rules. Layer declarations are idempotent in the browser
-      // (first occurrence sets the priority order), so re-emitting them
-      // is harmless and keeps each delta self-describing.
+      // Add another rule to the same request and flush again. The marker
+      // should NOT reappear because the client already knows the group.
       StyleSheet.create({ b: makeStyle() });
       const second = StyleSheet.takeRequestDelta();
-      expect(second).toMatch(/@layer rnw-[\w-]+ \{/);
       expect(second).toMatch(/\.r-[^ ]+ ?\{/);
+      expect(second).not.toContain('[stylesheet-group="');
     });
   });
 

@@ -31,7 +31,18 @@ describe('createSheet', () => {
     expect(sheet).not.toBe(iframeSheet);
     expect(iframeSheet.id).toMatchInlineSnapshot(`"react-native-stylesheet"`);
     expect(typeof iframeSheet.insert).toBe('function');
-    expect(iframeDoc.getElementById('react-native-stylesheet')).not.toBe(null);
+    // Client-side rendering uses the grouped format, so the mirrored sheet
+    // is one <style data-rnw-group> per group rather than a single element.
+    expect(
+      Array.prototype.slice
+        .call(iframeDoc.querySelectorAll('style[data-rnw-group]'))
+        .map((el) => el.getAttribute('data-rnw-group'))
+    ).toMatchInlineSnapshot(`
+      [
+        "0",
+        "3",
+      ]
+    `);
     // Does the content match existing sheets?
     expect(iframeSheet.getTextContent().includes('test-sheet')).toBe(true);
     // Does the content update when other sheets are updated?

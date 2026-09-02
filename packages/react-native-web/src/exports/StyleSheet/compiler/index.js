@@ -28,6 +28,7 @@ type CompilerOutput = [CompiledStyle, Array<RulesData>];
 const cache = new Map();
 const emptyObject = {};
 
+const resetGroup = 0;
 const classicGroup = 1;
 const atomicGroup = 3;
 const customGroup: { [key: string]: number } = {
@@ -77,6 +78,21 @@ const customGroup: { [key: string]: number } = {
   paddingInlineStart: 2.2,
   paddingInlineEnd: 2.2
 };
+
+/**
+ * Every group the compiler can emit, ascending. Groups exist to give
+ * longhands (group 3) higher cascade priority than the shorthands they
+ * override (group 2.x), so anything that orders CSS by group needs the
+ * canonical list rather than a duplicated literal.
+ */
+export const orderedGroups: $ReadOnlyArray<number> = Array.from(
+  new Set([
+    resetGroup,
+    classicGroup,
+    ...Object.keys(customGroup).map((prop) => customGroup[prop]),
+    atomicGroup
+  ])
+).sort((a, b) => a - b);
 
 const borderTopLeftRadius = 'borderTopLeftRadius';
 const borderTopRightRadius = 'borderTopRightRadius';

@@ -7,7 +7,7 @@
  * @flow
  */
 
-import { atomic, classic, inline } from './compiler';
+import { atomic, classic, inline, orderedGroups } from './compiler';
 import { createSheet } from './dom';
 import { localizeStyle } from './localizeStyle';
 import { preprocess } from './preprocess';
@@ -34,11 +34,18 @@ const REQUEST_DELTA_KEY = 'StyleSheet.delta';
 
 type RequestDelta = {|
   // Rules added in insertion order, bucketed by group number.
-  pending: Map<number, Array<string>>
+  pending: Map<number, Array<string>>,
+  // Groups for which a `[stylesheet-group="N"]{}` marker rule has already
+  // been emitted in a prior flush during this request. Subsequent flushes
+  // skip the marker for these groups; only the new content is emitted.
+  emittedGroupMarkers: Set<number>
 |};
 
 function createRequestDelta(): RequestDelta {
-  return { pending: new Map() };
+  return {
+    emittedGroupMarkers: new Set(),
+    pending: new Map()
+  };
 }
 
 function appendRequestDelta(cssText: string, groupValue: number): void {
@@ -56,46 +63,67 @@ function appendRequestDelta(cssText: string, groupValue: number): void {
   bucket.push(cssText);
 }
 
-// Encode a group number as a CSS layer name. Mirrors the helper in
-// dom/createOrderedCSSStyleSheet.js; kept inline here to avoid coupling
-// the API export to a sub-module path.
-function layerNameForGroup(group: number): string {
-  return `rnw-${String(group).replace('.', '-')}`;
+function encodeGroupMarker(group: number): string {
+  return `[stylesheet-group="${group}"]{}`;
 }
 
 /**
- * Drain the current request's pending delta into a CSS text fragment suitable
- * for emission as `<style data-rnw-delta="...">{textContent}</style>` in the
- * streamed response. Returns an empty string if there is no active request
- * scope or no pending rules.
- *
- * Output uses CSS Cascade Layers — one `@layer rnw-<group> { … }` block per
- * group that has pending rules. Layer ordering is established by the shell
- * head dump's `@layer …;` declaration; subsequent deltas don't need to
- * re-declare. Re-emitting a layer block for an already-declared layer is
- * idempotent — the browser merges the rules into the same cascade tier.
+ * Drain the current request's pending delta into ascending `[group, rules]`
+ * buckets, emptying the buffer. Returns `[]` if there is no active request
+ * scope or nothing pending.
  */
-function takeRequestDelta(): string {
-  if (!hasRequestScope()) return '';
+function drainRequestDelta(): Array<[number, Array<string>]> {
+  if (!hasRequestScope()) return [];
   const delta = getScopedState<RequestDelta>(
     REQUEST_DELTA_KEY,
     createRequestDelta
   );
-  if (delta.pending.size === 0) return '';
+  if (delta.pending.size === 0) return [];
 
-  const orderedGroups = Array.from(delta.pending.keys()).sort((a, b) =>
-    a > b ? 1 : -1
-  );
-  const blocks = [];
-  for (const group of orderedGroups) {
+  const groups = Array.from(delta.pending.keys()).sort((a, b) => a - b);
+  const out: Array<[number, Array<string>]> = [];
+  for (const group of groups) {
     const bucket = delta.pending.get(group);
-    if (bucket == null || bucket.length === 0) continue;
-    blocks.push(
-      `@layer ${layerNameForGroup(group)} {\n${bucket.join('\n')}\n}`
-    );
+    if (bucket != null && bucket.length > 0) {
+      out.push([group, bucket]);
+    }
   }
   delta.pending.clear();
-  return blocks.join('\n');
+  return out;
+}
+
+/**
+ * Drain the current request's pending delta into a single CSS text fragment.
+ * Returns an empty string if there is no active request scope or no pending
+ * rules.
+ *
+ * This is the lower-level, marker-delimited form, kept for callers that
+ * assemble their own `<style>` tags. The streaming pipeline uses
+ * `takeDeltaHTML` instead, which emits one element per group and needs no
+ * markers because the group travels on the element.
+ *
+ * Each group present in the delta is preceded by its `[stylesheet-group="N"]`
+ * marker rule the first time it appears for the request; subsequent flushes
+ * skip the marker because the client already knows the group exists.
+ */
+function takeRequestDelta(): string {
+  const buckets = drainRequestDelta();
+  if (buckets.length === 0) return '';
+  const delta = getScopedState<RequestDelta>(
+    REQUEST_DELTA_KEY,
+    createRequestDelta
+  );
+  const out = [];
+  for (const [group, rules] of buckets) {
+    if (!delta.emittedGroupMarkers.has(group)) {
+      out.push(encodeGroupMarker(group));
+      delta.emittedGroupMarkers.add(group);
+    }
+    for (const rule of rules) {
+      out.push(rule);
+    }
+  }
+  return out.join('\n');
 }
 
 /**
@@ -111,6 +139,9 @@ function resetRequestDelta(): void {
     createRequestDelta
   );
   delta.pending.clear();
+  // Note: we do not reset emittedGroupMarkers — once a marker has been emitted
+  // for the request (e.g. inline in the shell dump's text), subsequent chunks
+  // should not re-emit it.
 }
 
 // ---------------------------------------------------------------------------
@@ -119,14 +150,23 @@ function resetRequestDelta(): void {
 // Higher-level helpers that return ready-to-inline HTML fragments. SSR
 // adapters call these and embed the strings verbatim into the response.
 // Adapters do NOT need to know:
-//   - that the shell goes into `<style id="react-native-stylesheet">`
-//   - that streamed chunks use `<style data-rnw-delta="N">` + an inline
-//     `<script>` handshake
-//   - what the handshake script contains, or the names of any window
-//     globals it touches
+//   - that the shell emits one `<style data-rnw-group="G">` per group
+//   - that streamed chunks emit `<style data-rnw-group data-rnw-delta>` plus
+//     an inline `<script>` that relocates them into `<head>`
+//   - what that script contains, or the names of any window globals it
+//     touches
 // Those details are opaque to callers and may change without affecting
 // adapter code, provided the produced HTML is treated as a single
 // inert blob.
+//
+// Why per-group elements: RNW compiles CSS at runtime, so rules are
+// discovered progressively and must be streamed across chunks — but they
+// still need the priority order that makes longhands (group 3) beat the
+// shorthands they override (group 2.x), regardless of which chunk each
+// arrived in. Making each group a physically separate `<style>` in `<head>`,
+// ascending, means priority is plain DOM order: no `@layer` (unsupported
+// below Chrome 99 / Safari 15.4, and it fails by rendering *nothing*), no
+// shorthand expansion, and no dependency on React's hoisting.
 // ---------------------------------------------------------------------------
 
 const REQUEST_SEQ_KEY = 'StyleSheet.delta-seq';
@@ -152,53 +192,122 @@ function escapeForStyleTag(css: string): string {
   return css.replace(/<\/style/gi, '<\\/style');
 }
 
-/**
- * Return the HTML fragment that carries the full cumulative server sheet,
- * ready to inline anywhere the adapter wants (typically right before
- * `</head>`). Also resets the per-request delta buffer — anything that
- * was dual-written during the shell render is already in the dump, so
- * subsequent streaming chunks should only carry rules added AFTER this
- * point.
- *
- * The returned fragment is the primary RNW stylesheet element; client
- * runtime will adopt it on boot and append to it via insertRule. This
- * keeps shell rules and runtime additions inside the same CSSOM, which
- * is the only place CSS Cascade Layer ordering is reliable.
- *
- * Returns '' if there are no rules to emit.
- */
-function takeShellHTML(): string {
-  const { textContent } = getSheet();
-  resetRequestDelta();
-  if (!textContent) return '';
-  return `<style id="react-native-stylesheet">${escapeForStyleTag(
-    textContent
-  )}</style>`;
+type EmitOptions = { nonce?: ?string, ... };
+
+// Escape a value for an HTML double-quoted attribute.
+function escapeForAttr(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function nonceAttr(options: EmitOptions): string {
+  const nonce = options.nonce;
+  return nonce != null && nonce !== ''
+    ? ` nonce="${escapeForAttr(nonce)}"`
+    : '';
 }
 
 /**
- * Return the HTML fragment for a streamed post-shell chunk: the rules
- * that landed in the current request since the last `takeShellHTML` /
- * `takeDeltaHTML` call, plus a tiny inline handshake script that tells
- * the runtime to learn about them.
+ * Move every not-yet-relocated delta `<style>` out of `<body>` and into
+ * `<head>`, directly after its group's anchor. Runs synchronously while the
+ * chunk is being parsed, so there is no paint between the element applying
+ * and it being in the right cascade position.
  *
- * Adapters embed this verbatim at chunk boundaries. The internals of
- * the script — what window globals it touches, how it coordinates with
- * the runtime — are intentionally opaque.
+ * Properties that matter:
+ *   - Moving the element re-parses only its own text, so this is O(delta),
+ *     not O(whole sheet). Merging the text into the anchor would be O(n^2).
+ *   - Idempotent: relocated elements are no longer under `body`, so a re-run
+ *     finds nothing. Every chunk can safely run it.
+ *   - Fails safe: a delta whose group has no anchor stays in `<body>` rather
+ *     than landing in the wrong bucket.
+ *   - Intra-group order is irrelevant — styleq dedupes by property key, so
+ *     two rules in one group never target the same property on the same
+ *     element — which is why inserting right after the anchor is enough.
+ *   - Needs no RNW runtime, and works with JS disabled to the extent that
+ *     nothing moves: styles still apply, only cross-chunk shorthand vs
+ *     longhand ordering is wrong.
+ */
+const RELOCATE_SCRIPT =
+  'var d=document,h=d.head,' +
+  "p=d.querySelectorAll('body style[data-rnw-delta]'),i,e,g,a;" +
+  'for(i=0;i<p.length;i++){e=p[i];g=e.getAttribute("data-rnw-group");' +
+  "a=g?h.querySelector('style[data-rnw-group=\"'+g+'\"]:not([data-rnw-delta])'):null;" +
+  'if(a)h.insertBefore(e,a.nextSibling);}';
+
+/**
+ * Return the HTML fragment carrying the full cumulative server sheet as one
+ * `<style data-rnw-group="G">` per group, ascending — ready to inline
+ * anywhere the adapter wants (typically right before `</head>`).
+ *
+ * **Empty groups are emitted too.** They are the anchors later chunks insert
+ * against; an absent anchor would send that chunk's delta to the end of
+ * `<head>`, where it outranks every group above it. That is the exact trap
+ * both `@layer` and React's `precedence` fall into for a bucket they have
+ * not seen before.
+ *
+ * Also resets the per-request delta buffer: anything dual-written during the
+ * shell render is already in this fragment, so subsequent chunks carry only
+ * rules added AFTER this point.
+ */
+function takeShellHTML(options?: EmitOptions = {}): string {
+  const groupText = new Map(sheet.getGroupTextContent());
+  resetRequestDelta();
+
+  const groups = [];
+  orderedGroups.forEach((group) => groups.push(group));
+  groupText.forEach((_text, group) => {
+    if (groups.indexOf(group) === -1) groups.push(group);
+  });
+  groups.sort((a, b) => a - b);
+
+  const attr = nonceAttr(options);
+  return groups
+    .map((group) => {
+      const text = groupText.get(group) || '';
+      return `<style data-rnw-group="${group}"${attr}>${escapeForStyleTag(
+        text
+      )}</style>`;
+    })
+    .join('');
+}
+
+/**
+ * Return the HTML fragment for a streamed post-shell chunk: the rules that
+ * landed in the current request since the last `takeShellHTML` /
+ * `takeDeltaHTML` call, as one `<style>` per group, plus a tiny inline
+ * script that relocates them into `<head>` and tells the runtime about them.
+ *
+ * Adapters embed this verbatim at chunk boundaries. Pass `nonce` when the
+ * response is served under a CSP that requires one; it is applied to both
+ * the style elements and the script.
  *
  * Returns '' if the buffer is empty (no new rules this chunk).
  */
-function takeDeltaHTML(): string {
-  const delta = takeRequestDelta();
-  if (!delta) return '';
-  const seq = nextDeltaSeq();
-  const styleTag = `<style data-rnw-delta="${seq}">${escapeForStyleTag(
-    delta
-  )}</style>`;
-  const handshake =
-    `<script>(window.__RNW_DELTA__=window.__RNW_DELTA__||[]).push("${seq}");` +
-    `if(window.__RNW_INGEST_DELTA__)window.__RNW_INGEST_DELTA__();</script>`;
-  return styleTag + handshake;
+function takeDeltaHTML(options?: EmitOptions = {}): string {
+  const buckets = drainRequestDelta();
+  if (buckets.length === 0) return '';
+
+  const attr = nonceAttr(options);
+  const ids = [];
+  let styleTags = '';
+  for (const [group, rules] of buckets) {
+    const seq = nextDeltaSeq();
+    ids.push(seq);
+    styleTags +=
+      `<style data-rnw-group="${group}" data-rnw-delta="${seq}"${attr}>` +
+      `${escapeForStyleTag(rules.join('\n'))}</style>`;
+  }
+
+  const pushIds = ids.map((id) => `"${id}"`).join(',');
+  const script =
+    `<script${attr}>(function(){${RELOCATE_SCRIPT}` +
+    `(window.__RNW_DELTA__=window.__RNW_DELTA__||[]).push(${pushIds});` +
+    `if(window.__RNW_INGEST_DELTA__)window.__RNW_INGEST_DELTA__();})();</script>`;
+
+  return styleTags + script;
 }
 
 const defaultPreprocessOptions = { shadow: true, textShadow: true };

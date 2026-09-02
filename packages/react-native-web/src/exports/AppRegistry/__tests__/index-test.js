@@ -95,11 +95,25 @@ describe.each([['concurrent'], ['legacy']])('AppRegistry', (mode) => {
       expect(iframedoc).toBe(iframe.contentWindow.document);
       expect(iframedoc).not.toBe(document);
 
-      const cssText = Array.prototype.slice
-        .call(
-          iframedoc.getElementById('react-native-stylesheet').sheet.cssRules
-        )
-        .map((cssRule) => cssRule.cssText);
+      // Styles are mirrored into the other document as one <style> per
+      // group, ascending — the same layout the streaming shell emits, so
+      // the cascade order is identical in both documents.
+      const styleElements = Array.prototype.slice.call(
+        iframedoc.querySelectorAll('style[data-rnw-group]')
+      );
+      expect(
+        styleElements.map((el) => el.getAttribute('data-rnw-group'))
+      ).toEqual(['0', '1', '2', '3']);
+
+      const cssText = styleElements.reduce(
+        (acc, el) =>
+          acc.concat(
+            Array.prototype.slice
+              .call(el.sheet.cssRules)
+              .map((cssRule) => cssRule.cssText)
+          ),
+        []
+      );
 
       expect(cssText).toMatchSnapshot();
     });

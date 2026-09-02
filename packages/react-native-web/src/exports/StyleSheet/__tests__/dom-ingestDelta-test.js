@@ -102,6 +102,46 @@ describe('createSheet streaming-delta late ingest', () => {
     });
   });
 
+  test('grouped deltas take their group from the element attribute', () => {
+    jest.isolateModules(() => {
+      // The streaming format: no marker rules, the group travels on the
+      // element so the inline relocation script can read it too.
+      planStyleElement('.grouped-delta { margin: 4px }', {
+        'data-rnw-group': '2',
+        'data-rnw-delta': '10'
+      });
+
+      const { createSheet } = require('../dom');
+      const sheet = createSheet();
+
+      expect(sheet.insert('.grouped-delta { margin: 4px }', 2).ruleAdded).toBe(
+        false
+      );
+      // Registered under group 2, not appended to whatever came last.
+      expect(sheet.getTextContent()).toMatch(
+        /\[stylesheet-group="2"\]\{\}\n\.grouped-delta/
+      );
+    });
+  });
+
+  test('a grouped delta arriving after boot is ingested too', () => {
+    jest.isolateModules(() => {
+      const { createSheet } = require('../dom');
+      const sheet = createSheet();
+
+      planStyleElement('.late-grouped { margin-top: 4px }', {
+        'data-rnw-group': '3',
+        'data-rnw-delta': '11'
+      });
+      (window.__RNW_DELTA__ = window.__RNW_DELTA__ || []).push('11');
+      window.__RNW_INGEST_DELTA__();
+
+      expect(
+        sheet.insert('.late-grouped { margin-top: 4px }', 3).ruleAdded
+      ).toBe(false);
+    });
+  });
+
   test('queues delta ids when the hook is not yet installed', () => {
     jest.isolateModules(() => {
       // Server's inline script runs before RNW boots. It pushes into the
