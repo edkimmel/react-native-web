@@ -13,7 +13,7 @@
 import type { EventSubscription } from '../../vendor/react-native/vendor/emitter/EventEmitter';
 import invariant from 'fbjs/lib/invariant';
 import canUseDOM from '../../modules/canUseDom';
-import { getScopedState } from '../../modules/asyncContext';
+import { getProcessState, getScopedState } from '../../modules/asyncContext';
 
 export type DisplayMetrics = {|
   fontScale: number,
@@ -50,8 +50,20 @@ const createDefaultDimensions = (): DimensionsValue => ({
 // isolation: each SSR render writes its own `window` / `screen` values via
 // `Dimensions.set`, and `Dimensions.get` reads them back. On the client
 // and outside any request scope this returns a stable process singleton.
+//
+// A new scope starts as a copy of the process default rather than as
+// zeros, so the established pattern of seeding viewport metrics once at
+// module scope keeps working. A shallow clone per key is enough:
+// `Dimensions.set` replaces `window` and `screen` wholesale rather than
+// mutating their fields.
 function getDimensions(): DimensionsValue {
-  return getScopedState('Dimensions', createDefaultDimensions);
+  return getScopedState('Dimensions', () => {
+    const base = getProcessState('Dimensions', createDefaultDimensions);
+    return {
+      window: { ...base.window },
+      screen: { ...base.screen }
+    };
+  });
 }
 
 // Event listeners are runtime subscriptions added post-mount; on the
@@ -64,6 +76,12 @@ let setForHydration = false;
 
 function update() {
   if (!canUseDOM) {
+    return;
+  }
+
+  // While hydration values are forced, a resize must not overwrite them.
+  // `unsafe_restoreFromHydration` clears the flag before calling update().
+  if (setForHydration) {
     return;
   }
 
@@ -177,6 +195,9 @@ export default class Dimensions {
         );
       } else {
         setForHydration = true;
+        // The forced values stand in for what update() would have read, so
+        // the lazy first-get initialization is already satisfied.
+        shouldInit = false;
         const dimensions = getDimensions();
         if (initialDimensions.screen != null) {
           dimensions.screen = initialDimensions.screen;

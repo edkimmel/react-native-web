@@ -54,4 +54,22 @@ describe('apis/Dimensions', () => {
     window.dispatchEvent(new Event('resize'));
     expect(handler).toHaveBeenCalledTimes(0);
   });
+
+  test('unsafe_setForHydration values survive a resize', () => {
+    Dimensions.unsafe_setForHydration({
+      window: { fontScale: 1, height: 700, scale: 1, width: 360 },
+      screen: { fontScale: 1, height: 800, scale: 1, width: 360 }
+    });
+    expect(Dimensions.get('window').width).toBe(360);
+
+    // A resize between set and restore must not undo the forced values;
+    // the whole point of the override is that layout matches the server.
+    window.dispatchEvent(new Event('resize'));
+    expect(Dimensions.get('window').width).toBe(360);
+    expect(Dimensions.get('screen').height).toBe(800);
+
+    Dimensions.unsafe_restoreFromHydration();
+    expect(Dimensions.get('window').width).toBe(1024);
+    expect(Dimensions.get('window').height).toBe(768);
+  });
 });
