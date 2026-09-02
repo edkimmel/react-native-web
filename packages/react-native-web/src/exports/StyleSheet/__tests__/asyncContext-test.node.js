@@ -75,7 +75,7 @@ describe('StyleSheet per-request delta', () => {
     });
   });
 
-  test("concurrent scopes do not see each other's rules", async () => {
+  test('every concurrent scope receives every rule its own render needs', async () => {
     const styles = [makeStyle(), makeStyle(), makeStyle(), makeStyle()];
     const deltas = await Promise.all(
       styles.map((styleObj) =>
@@ -88,16 +88,94 @@ describe('StyleSheet per-request delta', () => {
         })
       )
     );
-    // Each delta must contain its own width value and no other scope's value.
-    // Atomic CSS embeds the width as `width:NNNpx` in the rule body.
+
+    // Completeness is the invariant that matters: a client that misses a
+    // rule renders unstyled. Atomic CSS embeds the width as `width:NNNpx`.
     deltas.forEach((delta, i) => {
-      const ownToken = `width:${styles[i].width}px`;
-      expect(delta).toContain(ownToken);
-      styles.forEach((s, j) => {
-        if (i === j) return;
-        const otherToken = `width:${s.width}px`;
-        expect(delta).not.toContain(otherToken);
-      });
+      expect(delta).toContain(`width:${styles[i].width}px`);
+    });
+
+    // Precision is explicitly NOT claimed. Because the shared sheet is
+    // process-wide and a lazily imported module inserts its rules exactly
+    // once, a request cannot know which of the rules that appeared during
+    // its lifetime its own boundaries needed — so it takes all of them.
+    // `takeShellHTML` already ships the whole sheet to every client, so
+    // this is the same imprecision one flush earlier, and it disappears
+    // once the app is warm and nothing new is being inserted.
+  });
+
+  test("a rule inserted by another request after this one's shell still reaches it", () => {
+    // The concurrency hole. B flushes its shell, and only afterwards does
+    // another request insert a rule that B's own boundary then renders.
+    //
+    // B never calls StyleSheet.create: that is the point. A lazily imported
+    // module runs its module-scope create() once per process, so the request
+    // that reaches the boundary second inserts nothing. Any delta keyed on
+    // "rules I inserted" is empty here, and B's client renders unstyled —
+    // exactly the FOUC the delta channel exists to prevent.
+    const shared = makeStyle();
+    const token = `width:${shared.width}px`;
+
+    let releaseB;
+    const bMayResume = new Promise((resolve) => {
+      releaseB = resolve;
+    });
+
+    const bDelta = runInRequestScope(async () => {
+      const shell = StyleSheet.takeShellHTML();
+      // The rule does not exist yet, so B's shell cannot contain it.
+      expect(shell).not.toContain(token);
+      await bMayResume;
+      return StyleSheet.takeDeltaHTML();
+    });
+
+    // Request A is the one that evaluates the module.
+    runInRequestScope(() => {
+      StyleSheet.create({ shared });
+    });
+
+    releaseB();
+    return bDelta.then((delta) => {
+      expect(delta).toContain(token);
+    });
+  });
+
+  test("a rule already in this request's shell is not repeated in its delta", () => {
+    // The converse guard: the fix must not degrade into re-sending the
+    // whole sheet on every chunk.
+    const early = makeStyle();
+    const earlyToken = `width:${early.width}px`;
+
+    runInRequestScope(() => {
+      StyleSheet.create({ early });
+    });
+
+    runInRequestScope(() => {
+      const shell = StyleSheet.takeShellHTML();
+      expect(shell).toContain(earlyToken);
+      // Nothing new since the shell.
+      expect(StyleSheet.takeDeltaHTML()).toBe('');
+
+      const late = makeStyle();
+      StyleSheet.create({ late });
+      const delta = StyleSheet.takeDeltaHTML();
+      expect(delta).toContain(`width:${late.width}px`);
+      expect(delta).not.toContain(earlyToken);
+    });
+  });
+
+  test('a rule is not repeated across chunks within one request', () => {
+    runInRequestScope(() => {
+      StyleSheet.takeShellHTML();
+
+      const styleObj = makeStyle();
+      const token = `width:${styleObj.width}px`;
+      StyleSheet.create({ chunked: styleObj });
+
+      expect(StyleSheet.takeDeltaHTML()).toContain(token);
+      // Re-rendering the same styles in a later chunk adds nothing.
+      StyleSheet.create({ chunked: styleObj });
+      expect(StyleSheet.takeDeltaHTML()).toBe('');
     });
   });
 

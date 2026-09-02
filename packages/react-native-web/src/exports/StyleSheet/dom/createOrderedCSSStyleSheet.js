@@ -37,6 +37,12 @@ export type OrderedCSSStyleSheet = {|
   // The same records as `getTextContent`, split per group and without the
   // marker rules, for emitting one `<style data-rnw-group>` per group.
   getGroupTextContent: () => Array<[number, string]>,
+  // How many rules this sheet has ever recorded. Rules are only ever added,
+  // so this is a monotonic clock: a reader that remembers the value it saw
+  // can ask for exactly what has appeared since.
+  getRevision: () => number,
+  // Every `[group, cssText]` recorded after `revision`, in insertion order.
+  getRulesSince: (revision: number) => Array<[number, string]>,
   insert: (cssText: string, groupValue: number) => InsertResult,
   // Update the bookkeeping (groups + selectors) as if the rule had been
   // inserted, but skip the CSSOM `insertRule` call. Used to tell the runtime
@@ -72,6 +78,23 @@ export default function createOrderedCSSStyleSheet(
   const selectors: Selectors = {};
   const isGrouped = grouped != null;
 
+  // Append-only log of every rule this sheet has recorded, in insertion
+  // order. Its length is the sheet's revision.
+  //
+  // This exists for streaming SSR. The sheet is process-wide and shared by
+  // concurrent requests, so "was this rule new to the sheet?" answers a
+  // global question, while a streaming response needs a per-request one:
+  // "what has appeared since I flushed my shell?" A monotonic log answers
+  // that for any number of concurrent readers with one integer each, and —
+  // unlike tracking who inserted what — it stays correct when the rule was
+  // inserted by a *different* request. That is the common case: a lazily
+  // imported module runs `StyleSheet.create` once per process, so only the
+  // first request to reach a Suspense boundary inserts anything at all.
+  //
+  // The strings are the same references already held in `groups`, so the
+  // log costs an array slot and a small tuple per rule, not a second copy.
+  const ruleLog: Array<[number, string]> = [];
+
   /**
    * Create the bookkeeping record for `group` if it is new. The marker rule
    * is always recorded, in both modes, so `getTextContent` keeps producing
@@ -94,7 +117,15 @@ export default function createOrderedCSSStyleSheet(
     }
     selectors[selectorText] = true;
     groups[group].rules.push(cssText);
+    ruleLog.push([group, cssText]);
     return true;
+  }
+
+  /** Undo the most recent `recordRule`. Only valid immediately after one. */
+  function unrecordRule(group: number, selectorText: string): void {
+    groups[group].rules.pop();
+    ruleLog.pop();
+    delete selectors[selectorText];
   }
 
   /**
@@ -240,6 +271,22 @@ export default function createOrderedCSSStyleSheet(
     },
 
     /**
+     * The sheet's monotonic revision: the number of rules recorded so far.
+     */
+    getRevision(): number {
+      return ruleLog.length;
+    },
+
+    /**
+     * Every `[group, cssText]` recorded after `revision`, in insertion
+     * order. A revision beyond the current one yields nothing.
+     */
+    getRulesSince(revision: number): Array<[number, string]> {
+      const from = revision > 0 ? revision : 0;
+      return ruleLog.slice(from);
+    },
+
+    /**
      * Insert a rule into the style sheet. Returns details about whether the
      * group and/or rule were actually added so callers can mirror genuine
      * mutations into a side channel (e.g. an ALS per-request delta buffer)
@@ -276,8 +323,7 @@ export default function createOrderedCSSStyleSheet(
         if (isInserted === false) {
           // Revert internal record change if a rule was rejected (e.g.,
           // unrecognized pseudo-selector)
-          groups[group].rules.pop();
-          delete selectors[selectorText];
+          unrecordRule(group, selectorText);
           ruleAdded = false;
         }
       }

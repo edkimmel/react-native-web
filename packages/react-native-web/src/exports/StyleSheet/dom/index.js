@@ -205,6 +205,15 @@ export function createSheet(
     getGroupTextContent() {
       return sheet.getGroupTextContent();
     },
+    // The revision clock and the log both come from the primary sheet.
+    // Secondary sheets (iframe / shadow clones) mirror its content, so they
+    // carry no information the primary does not already have.
+    getRevision() {
+      return sheets.length > 0 ? sheets[0].getRevision() : 0;
+    },
+    getRulesSince(revision: number): Array<[number, string]> {
+      return sheets.length > 0 ? sheets[0].getRulesSince(revision) : [];
+    },
     getTextContent() {
       return sheet.getTextContent();
     },

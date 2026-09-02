@@ -112,6 +112,96 @@ describe('createOrderedCSSStyleSheet', () => {
     });
   });
 
+  describe('#getRevision / #getRulesSince', () => {
+    // The revision log is what lets concurrent SSR requests each work out
+    // what has appeared since their own shell flush, without any of them
+    // having to know who inserted it.
+    test('revision counts recorded rules and only recorded rules', () => {
+      const sheet = createOrderedCSSStyleSheet();
+      expect(sheet.getRevision()).toBe(0);
+
+      sheet.insert('.a { width: 1px }', 1);
+      expect(sheet.getRevision()).toBe(1);
+
+      // Creating a group is not a rule; the marker is bookkeeping only.
+      sheet.insert('.b { width: 2px }', 3);
+      expect(sheet.getRevision()).toBe(2);
+
+      // A duplicate selector is deduped, so the clock must not advance —
+      // otherwise every concurrent reader's watermark drifts past rules
+      // they never received.
+      sheet.insert('.a { width: 1px }', 1);
+      expect(sheet.getRevision()).toBe(2);
+    });
+
+    test('getRulesSince returns what arrived after a watermark, with groups', () => {
+      const sheet = createOrderedCSSStyleSheet();
+      sheet.insert('.shell { width: 1px }', 1);
+      const watermark = sheet.getRevision();
+
+      sheet.insert('.late-shorthand { margin: 8px }', 2);
+      sheet.insert('.late-longhand { margin-top: 4px }', 3);
+
+      expect(sheet.getRulesSince(watermark)).toEqual([
+        [2, '.late-shorthand { margin: 8px }'],
+        [3, '.late-longhand { margin-top: 4px }']
+      ]);
+      // Nothing is lost by asking from the start.
+      expect(sheet.getRulesSince(0)).toHaveLength(3);
+      // A watermark at or beyond the present yields nothing.
+      expect(sheet.getRulesSince(sheet.getRevision())).toEqual([]);
+    });
+
+    test('registerExisting advances the revision too', () => {
+      // Client-side ingest of a streamed delta goes through registerExisting.
+      const sheet = createOrderedCSSStyleSheet();
+      sheet.registerExisting('.from-delta { width: 3px }', 2);
+      expect(sheet.getRulesSince(0)).toEqual([
+        [2, '.from-delta { width: 3px }']
+      ]);
+    });
+
+    test('a rule the CSSOM rejects leaves no entry in the log', () => {
+      // Otherwise the rejected rule would occupy a revision, shifting every
+      // later one and silently corrupting every concurrent request's delta.
+      //
+      // A real browser rejects vendor-prefixed selectors it does not know.
+      // jsdom's CSS parser is permissive and accepts nearly anything, so the
+      // rejection is simulated rather than provoked.
+      const rejected = [];
+      const cssomSheet = {
+        cssRules: [],
+        insertRule(cssText, position) {
+          if (cssText.indexOf('.bogus') > -1) {
+            rejected.push(cssText);
+            throw new Error('rejected by the CSSOM');
+          }
+          this.cssRules.splice(position, 0, { cssText });
+          return position;
+        }
+      };
+      const sheet = createOrderedCSSStyleSheet(cssomSheet);
+
+      sheet.insert('.valid { width: 1px }', 1);
+      const afterValid = sheet.getRevision();
+
+      const result = sheet.insert('.bogus { width: 2px }', 1);
+      expect(rejected).toHaveLength(1);
+      expect(result.ruleAdded).toBe(false);
+      expect(sheet.getRevision()).toBe(afterValid);
+      expect(sheet.getRulesSince(0)).toEqual([[1, '.valid { width: 1px }']]);
+      expect(sheet.getTextContent()).not.toContain('.bogus');
+
+      // The next legitimate rule takes the revision the rejected one would
+      // otherwise have consumed.
+      sheet.insert('.next { width: 3px }', 1);
+      expect(sheet.getRevision()).toBe(afterValid + 1);
+      expect(sheet.getRulesSince(afterValid)).toEqual([
+        [1, '.next { width: 3px }']
+      ]);
+    });
+  });
+
   describe('client-side hydration', () => {
     let element;
 

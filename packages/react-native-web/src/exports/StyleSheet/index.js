@@ -33,34 +33,24 @@ const sheet = createSheet();
 const REQUEST_DELTA_KEY = 'StyleSheet.delta';
 
 type RequestDelta = {|
-  // Rules added in insertion order, bucketed by group number.
-  pending: Map<number, Array<string>>,
+  // The sheet revision this request's client has been brought up to date
+  // with: everything recorded at or before it has already been sent, in the
+  // shell dump or in an earlier chunk. Starts at 0 — a client that has
+  // received nothing is behind everything.
+  revision: number,
   // Groups for which a `[stylesheet-group="N"]{}` marker rule has already
   // been emitted in a prior flush during this request. Subsequent flushes
   // skip the marker for these groups; only the new content is emitted.
+  // Used by `takeRequestDelta`'s marker format only — `takeDeltaHTML` puts
+  // the group on the element instead.
   emittedGroupMarkers: Set<number>
 |};
 
 function createRequestDelta(): RequestDelta {
   return {
     emittedGroupMarkers: new Set(),
-    pending: new Map()
+    revision: 0
   };
-}
-
-function appendRequestDelta(cssText: string, groupValue: number): void {
-  if (!hasRequestScope()) return;
-  const delta = getScopedState<RequestDelta>(
-    REQUEST_DELTA_KEY,
-    createRequestDelta
-  );
-  const group = Number(groupValue);
-  let bucket = delta.pending.get(group);
-  if (bucket == null) {
-    bucket = [];
-    delta.pending.set(group, bucket);
-  }
-  bucket.push(cssText);
 }
 
 function encodeGroupMarker(group: number): string {
@@ -68,9 +58,24 @@ function encodeGroupMarker(group: number): string {
 }
 
 /**
- * Drain the current request's pending delta into ascending `[group, rules]`
- * buckets, emptying the buffer. Returns `[]` if there is no active request
- * scope or nothing pending.
+ * Everything recorded in the shared sheet since this request last flushed,
+ * bucketed by group ascending, and advance the request's watermark past it.
+ * Returns `[]` outside a request scope or when nothing has been added.
+ *
+ * Note what this deliberately does *not* do: it does not ask which rules
+ * this request's own render inserted. It cannot — a lazily imported module
+ * runs `StyleSheet.create` once per process, so for every request after the
+ * first the rules its Suspense boundary needs were inserted by somebody
+ * else's render and this request inserts nothing at all. Anything keyed on
+ * "did I insert it?" therefore sends that request an empty delta and its
+ * client renders the boundary unstyled.
+ *
+ * Sending everything added since the watermark can hand a request rules only
+ * a concurrent request needed. That is the same imprecision `takeShellHTML`
+ * already has — it dumps the whole process sheet to every client — and it
+ * costs nothing once the app is warm, because then nothing is being added
+ * and every delta is empty. Duplicate rules are inert on the client anyway:
+ * ingest dedups by selector.
  */
 function drainRequestDelta(): Array<[number, Array<string>]> {
   if (!hasRequestScope()) return [];
@@ -78,18 +83,25 @@ function drainRequestDelta(): Array<[number, Array<string>]> {
     REQUEST_DELTA_KEY,
     createRequestDelta
   );
-  if (delta.pending.size === 0) return [];
 
-  const groups = Array.from(delta.pending.keys()).sort((a, b) => a - b);
-  const out: Array<[number, Array<string>]> = [];
-  for (const group of groups) {
-    const bucket = delta.pending.get(group);
-    if (bucket != null && bucket.length > 0) {
-      out.push([group, bucket]);
+  const revision = sheet.getRevision();
+  if (revision <= delta.revision) return [];
+  const added = sheet.getRulesSince(delta.revision);
+  delta.revision = revision;
+
+  const buckets: Map<number, Array<string>> = new Map();
+  for (const [group, cssText] of added) {
+    let bucket = buckets.get(group);
+    if (bucket == null) {
+      bucket = [];
+      buckets.set(group, bucket);
     }
+    bucket.push(cssText);
   }
-  delta.pending.clear();
-  return out;
+
+  return Array.from(buckets.keys())
+    .sort((a, b) => a - b)
+    .map((group) => [group, (buckets.get(group): any)]);
 }
 
 /**
@@ -127,10 +139,14 @@ function takeRequestDelta(): string {
 }
 
 /**
- * Discard any pending delta entries for the current request without emitting
- * them. The streaming pipeline calls this after the shell head dump, since
- * the full sheet text has already been emitted there and the delta channel
- * should only carry rules added *after* that point.
+ * Declare this request's client up to date with the sheet as it stands now,
+ * so the delta channel carries only what arrives after this point. The
+ * streaming pipeline calls this from `takeShellHTML`, which has just
+ * serialised the whole sheet.
+ *
+ * Both calls are synchronous with no await between them, so the watermark
+ * taken here matches exactly what the shell emitted. That is load-bearing:
+ * a rule slipping in between would be in neither the shell nor any delta.
  */
 function resetRequestDelta(): void {
   if (!hasRequestScope()) return;
@@ -138,7 +154,7 @@ function resetRequestDelta(): void {
     REQUEST_DELTA_KEY,
     createRequestDelta
   );
-  delta.pending.clear();
+  delta.revision = sheet.getRevision();
   // Note: we do not reset emittedGroupMarkers — once a marker has been emitted
   // for the request (e.g. inline in the shell dump's text), subsequent chunks
   // should not re-emit it.
@@ -330,17 +346,13 @@ function customStyleq(styles, options: Options = {}) {
 }
 
 function insertRules(compiledOrderedRules) {
+  // No delta bookkeeping here. The per-request delta is derived from the
+  // sheet's revision log at flush time, which is what makes it correct for a
+  // request whose rules were inserted by a concurrent one.
   compiledOrderedRules.forEach(([rules, order]) => {
     if (sheet != null) {
       rules.forEach((rule) => {
-        const { ruleAdded } = sheet.insert(rule, order);
-        // Only mirror rules that the dedup check accepted. Rules that the
-        // shared sheet already had (module-load-time inserts from a prior
-        // request, or repeated inserts within the same request) must not
-        // appear in the delta — they are already in the head dump.
-        if (ruleAdded) {
-          appendRequestDelta(rule, order);
-        }
+        sheet.insert(rule, order);
       });
     }
   });
