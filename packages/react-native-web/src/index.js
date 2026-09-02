@@ -72,9 +72,13 @@ export { default as useWindowDimensions } from './exports/useWindowDimensions';
 // SSR per-request scoping. Server entrypoints wrap each render in
 // `runInRequestScope` so module-level state inside RNW (the cumulative
 // StyleSheet, the per-request delta buffer) is isolated per request.
-// `getScopedState` and `hasRequestScope` let downstream SSR helpers
-// register their own per-request state behind the same scope.
+// `getScopedState`, `getProcessState` and `hasRequestScope` let downstream
+// SSR helpers register their own per-request state behind the same scope.
+// `configureRequestScope` supplies an `AsyncLocalStorage` on server runtimes
+// where `node:async_hooks` is not statically importable.
 export {
+  configureRequestScope,
+  getProcessState,
   getScopedState,
   hasRequestScope,
   runInRequestScope

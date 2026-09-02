@@ -8,6 +8,10 @@
   "description": "React Native for Web",
   "module": "dist/index.js",
   "main": "dist/cjs/index.js",
+  "browser": {
+    "./dist/modules/asyncContext/index.js": "./dist/modules/asyncContext/index.browser.js",
+    "./dist/cjs/modules/asyncContext/index.js": "./dist/cjs/modules/asyncContext/index.browser.js"
+  },
   "sideEffects": false,
   "files": [
     "dist",

@@ -3,7 +3,12 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-import { getScopedState, hasRequestScope, runInRequestScope } from '..';
+import {
+  getProcessState,
+  getScopedState,
+  hasRequestScope,
+  runInRequestScope
+} from '..';
 
 describe('modules/asyncContext', () => {
   test('returns process-default state outside any scope', () => {
@@ -51,6 +56,30 @@ describe('modules/asyncContext', () => {
     // The default state for this key should still be the lazy initial.
     const after = getScopedState('isolated-key', () => ({ leaked: false }));
     expect(after.leaked).toBe(false);
+  });
+
+  test('getProcessState reaches the process default from inside a scope', () => {
+    const outside = getScopedState('process-default-read', () => ({ v: 1 }));
+    runInRequestScope(() => {
+      const scoped = getScopedState('process-default-read', () => ({ v: 2 }));
+      scoped.v = 99;
+      // The scope's own state is separate...
+      expect(scoped).not.toBe(outside);
+      // ...but the process default is still reachable, unchanged.
+      expect(getProcessState('process-default-read', () => ({ v: 3 }))).toBe(
+        outside
+      );
+      expect(outside.v).toBe(1);
+    });
+  });
+
+  test('getProcessState lazily creates the default like getScopedState', () => {
+    const created = getProcessState('process-default-create', () => ({ v: 5 }));
+    expect(created.v).toBe(5);
+    // Same key, same reference; the second factory is ignored.
+    expect(getScopedState('process-default-create', () => ({ v: 6 }))).toBe(
+      created
+    );
   });
 
   test('nested scopes get their own state', () => {
