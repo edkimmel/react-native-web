@@ -341,7 +341,11 @@ function getSheet(): { id: string, textContent: string } {
 /**
  * resolve
  */
-type StyleProps = [string, { [key: string]: mixed } | null];
+// styleq >= 0.2.0 returns a third element: a debug string, currently always ''.
+// It does not affect rendered output; `createDOMProps` destructures only the
+// first two. Typed here so the declared shape matches what styleq actually
+// returns.
+type StyleProps = [string, { [key: string]: mixed } | null, string];
 type Options = {
   shadow?: boolean,
   textShadow?: boolean,

@@ -19,7 +19,8 @@ type StyleqOptions = {
   transform?: (EitherStyle) => EitherStyle,
 };
 
-type StyleqResult = [string, InlineStyle | null];
+// styleq >= 0.2.0 appends a third element: a debug string, currently always ''.
+type StyleqResult = [string, InlineStyle | null, string];
 type Styleq = (styles: Styles) => StyleqResult;
 
 type IStyleq = {
