@@ -853,6 +853,7 @@ shape of a call.
 | `onShellReady`     | `() => void`                 | none              | Called after the response is piped and the first bytes are on their way.                                                         |
 | `onAllReady`       | `() => void`                 | none              | Passed to React.                                                                                                                 |
 | `renderDocument`   | `boolean`                    | `false`           | The element renders `<html>`/`<head>`/`<body>` itself, so no prologue and no epilogue are written. See below.                    |
+| `waitForAll`       | `boolean`                    | `false`           | Hold every byte until the last boundary resolves, then write once. For crawlers. See below.                                      |
 
 It emits the doctype, `<html lang>`, `<meta charset="utf-8">` and the root
 div itself; `head` is everything else that belongs in `<head>`.
@@ -869,6 +870,41 @@ runInRequestScope(() => {
   renderToStreamingResponse({ element, response: res });
 });
 ```
+
+#### `waitForAll: true` — one settled document, for crawlers
+
+By default the response is progressive: the shell goes out with each Suspense
+boundary's fallback in place, and each boundary's real markup follows in a
+`<template>` that a `$RC` script moves into position. That is the point of
+streaming, and it is wrong for a client that does not run JavaScript — it reads
+the fallback.
+
+Buffering the streamed bytes and writing them as one blob does **not** fix it.
+Fizz has already committed to the progressive shape by the time the first
+boundary resolves, so the buffer contains the templates, the reveal scripts and
+the fallbacks, just delivered together.
+
+`waitForAll: true` pipes from React's `onAllReady` instead of `onShellReady`.
+Nothing has been flushed when the tree settles, so React serialises it
+directly: no `<template>`, no `$RC`, no fallback, every boundary's content in
+the position it belongs in.
+
+```js
+renderToStreamingResponse({
+  element,
+  response,
+  head,
+  waitForAll: isCrawler(request)
+});
+```
+
+Two things follow from nothing being written until the end, and both are useful
+for a crawler: the status code is still yours after a late boundary fails, and
+the body length is knowable before the first byte.
+
+The cost is latency and memory — there is no first flush until the slowest
+boundary resolves, and the whole document is held. Use it for clients that
+cannot benefit from streaming, not as a default.
 
 #### `renderDocument: true` — React owns the document
 

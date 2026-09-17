@@ -150,6 +150,10 @@ export type StreamingResponseOptions = {
   // prologue and no epilogue of its own. See "TWO DOCUMENT MODES" above for
   // the three things that then become the caller's.
   renderDocument?: ?boolean,
+  // Hold everything until every boundary has resolved, then write once. React
+  // serialises the settled tree with no `<template>`, no `$RC` script and no
+  // fallback, which is what a client that does not run JS needs to see.
+  waitForAll?: ?boolean,
   // The Node `http.ServerResponse` (or any writable stream) to stream into.
   response: Object,
   // `id` of the div the app is rendered into, and the one the client passes
@@ -203,6 +207,7 @@ export default function renderToStreamingResponse(
   );
 
   const renderDocument = opts.renderDocument === true;
+  const waitForAll = opts.waitForAll === true;
 
   // Rejected rather than ignored. All three describe the prologue this
   // function writes, and in `renderDocument` mode there is no prologue: a
@@ -291,11 +296,29 @@ export default function renderToStreamingResponse(
             `</head><body><div id="${rootId}">`
         });
 
+    // Destination first, then React. The transform consumes React's per-pass
+    // `flush()` in order to inject there, and can only forward it to
+    // destinations it already knows about — so a `response` piped second would
+    // not see the first pass flushed, and a compression stream in between
+    // would sit on the shell until the next boundary resolved. This is the
+    // ordering the whole wrapper exists to own.
+    const commit = () => {
+      response.statusCode = opts.status != null ? opts.status : 200;
+      if (typeof response.setHeader === 'function') {
+        response.setHeader('Content-Type', 'text/html; charset=utf-8');
+      }
+      injector.pipe(response);
+      pipe(injector);
+    };
+
     const { abort, pipe } = renderToPipeableStream(element, {
       bootstrapModules: opts.bootstrapModules,
       bootstrapScripts: opts.bootstrapScripts,
       nonce,
-      onAllReady: opts.onAllReady,
+      onAllReady() {
+        if (waitForAll) commit();
+        if (opts.onAllReady != null) opts.onAllReady();
+      },
       onError(error: mixed, errorInfo?: mixed) {
         if (opts.onError != null) {
           opts.onError(error, errorInfo);
@@ -320,18 +343,7 @@ export default function renderToStreamingResponse(
         );
       },
       onShellReady() {
-        response.statusCode = opts.status != null ? opts.status : 200;
-        if (typeof response.setHeader === 'function') {
-          response.setHeader('Content-Type', 'text/html; charset=utf-8');
-        }
-        // Destination first, then React. The transform consumes React's
-        // per-pass `flush()` in order to inject there, and can only forward
-        // it to destinations it already knows about — so a `response` piped
-        // second would not see the first pass flushed, and a compression
-        // stream in between would sit on the shell until the next boundary
-        // resolved. This is the ordering the whole wrapper exists to own.
-        injector.pipe(response);
-        pipe(injector);
+        if (!waitForAll) commit();
         if (opts.onShellReady != null) opts.onShellReady();
       }
     });
