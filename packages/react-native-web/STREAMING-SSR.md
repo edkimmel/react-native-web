@@ -852,6 +852,7 @@ shape of a call.
 | `onShellError`     | `(error) => void`            | a minimal 500     | The shell itself failed and nothing has been written. A replacement owns the response.                                           |
 | `onShellReady`     | `() => void`                 | none              | Called after the response is piped and the first bytes are on their way.                                                         |
 | `onAllReady`       | `() => void`                 | none              | Passed to React.                                                                                                                 |
+| `renderDocument`   | `boolean`                    | `false`           | The element renders `<html>`/`<head>`/`<body>` itself, so no prologue and no epilogue are written. See below.                    |
 
 It emits the doctype, `<html lang>`, `<meta charset="utf-8">` and the root
 div itself; `head` is everything else that belongs in `<head>`.
@@ -869,12 +870,83 @@ runInRequestScope(() => {
 });
 ```
 
-**When not to use it.** It writes `<head>` as a string, so React does not own
-the document. For `hydrateRoot(document, …)`, or a `<head>` that is [itself
-inside the stream](#stylesheet-anchors), drive `createStyleInjectionTransform`
-directly — and read [rendering `<head>` through
-React](#rendering-head-through-react) first. There is no Web Streams variant,
-for the reason in [known limitations](#known-limitations).
+#### `renderDocument: true` — React owns the document
+
+By default this writes the document around the app and `head` is a string, so
+React does not own `<head>`. That has one consequence worth stating plainly:
+**React only hoists `<title>`/`<meta>`/`<link>` into a `<head>` element it is
+itself rendering.** With the string `head`, `</head>` is already on the wire
+before React's first byte, and hoisted metadata lands in `<body>` instead.
+Nothing in this library can change that — once `</head>` has been written it is
+closed.
+
+`renderDocument: true` is the other arrangement. The element renders
+`<html>`/`<head>`/`<body>`, this function writes no markup at all, and
+everything else it owns — the request scope, the per-request device state, the
+transform, the pipe order, the abort deadline, the status line, the shell-error
+default — is unchanged.
+
+Three things become the caller's, and only these three:
+
+- **the anchors**, as `<StyleSheet.Anchors />` in `<head>`, above every
+  Suspense boundary in it. Not a convenience: a `<style>` in a React-owned
+  `<head>` that React did not render mis-binds hydration, silently. See
+  [rendering `<head>` through React](#rendering-head-through-react).
+- **the hydration snapshot**, as
+  `<script dangerouslySetInnerHTML={{ __html: takeHydrationStateScript() }} />`.
+  [`takeHydrationStateScript()`](#takehydrationstatescript) is
+  `takeHydrationStateHTML()` without the `<script>` wrapper, for exactly this.
+- **the doctype**, which React writes as soon as the tree renders `<html>`.
+
+```jsx
+function Document() {
+  return (
+    <html lang="en">
+      <head>
+        <meta charSet="utf-8" />
+        <title>App</title>
+        <script
+          dangerouslySetInnerHTML={{ __html: takeHydrationStateScript() }}
+        />
+        <StyleSheet.Anchors />
+      </head>
+      <body>
+        <div id="root">
+          <Suspense fallback={<Splash />}>
+            <App />
+          </Suspense>
+        </div>
+      </body>
+    </html>
+  );
+}
+
+renderToStreamingResponse({
+  element: <Document />,
+  renderDocument: true,
+  response: res,
+  bootstrapScripts: ['/client.js']
+});
+```
+
+`head`, `lang` and `rootId` describe the prologue that no longer exists, so
+passing one alongside `renderDocument` throws at the call site rather than
+being ignored. An ignored `head` is a `<title>` missing from a page that still
+returns 200.
+
+`renderDocument` does **not** imply a Suspense boundary above `<html>`. If your
+tree has one, React >= 19.1 is a hard floor — see the support table under
+[`<StyleSheet.Anchors />`](#stylesheet-anchors). A boundary that is merely
+*inside* `<body>`, with `<head>` above it, works on every supported version and
+is the shape that gives a head-only first flush.
+
+Under the hood this is `createStyleInjectionTransform({ nonce })` with no
+`prelude`, which is also what switches the transform onto its anchor byte scan.
+Reach past it to the transform directly only if you also need to own the
+response.
+
+There is no Web Streams variant, for the reason in [known
+limitations](#known-limitations).
 
 ### `createStyleInjectionTransform({ prelude, epilogue, nonce })`
 
@@ -1410,6 +1482,23 @@ The client needs no wiring: `useWindowDimensions` and `useColorScheme` read
 that snapshot through `getServerSnapshot`. Treat the payload as opaque —
 `unstable_setForHydration` is the supported way to supply the same values by
 hand, not writing the global yourself.
+
+### <a id="takehydrationstatescript"></a>`takeHydrationStateScript()`
+
+The same payload with no `<script>` wrapper, for a `<head>` React renders. There
+every `<script>` has to be an element React rendered, so what the app needs is
+the source text and the nonce goes on the JSX element:
+
+```jsx
+<script
+  dangerouslySetInnerHTML={{ __html: takeHydrationStateScript() }}
+  nonce={nonce}
+/>
+```
+
+One emission, two spellings — same sources, same escaping. Use it with
+[`renderDocument: true`](#renderdocument-true--react-owns-the-document); use
+`takeHydrationStateHTML()` when you are assembling the head as a string.
 
 ### `registerHydrationState(key, read)`
 
