@@ -10,7 +10,12 @@
 
 import type { ComponentType, Node } from 'react';
 
+import type { StyleElementProps } from './getStyleElements';
+
 import AppContainer from './AppContainer';
+import getStyleElementsImpl, {
+  createStyleFormatGuard
+} from './getStyleElements';
 import invariant from 'fbjs/lib/invariant';
 import render, { hydrate } from '../render';
 import StyleSheet from '../StyleSheet';
@@ -51,14 +56,21 @@ export function getApplication(
   RootComponent: ComponentType<Object>,
   initialProps: Object,
   WrapperComponent?: ?ComponentType<*>
-): {| element: Node, getStyleElement: (Object) => Node |} {
+): {|
+  element: Node,
+  getStyleElement: (Object) => Node,
+  getStyleElements: (?StyleElementProps) => Array<Node>
+|} {
   const element = (
     <AppContainer WrapperComponent={WrapperComponent} rootTag={{}}>
       <RootComponent {...initialProps} />
     </AppContainer>
   );
+  // A document must use one stylesheet format or the other, never both.
+  const recordStyleFormat = createStyleFormatGuard();
   // Don't escape CSS text
   const getStyleElement = (props) => {
+    recordStyleFormat('legacy');
     const sheet = StyleSheet.getSheet();
     return (
       <style
@@ -68,5 +80,11 @@ export function getApplication(
       />
     );
   };
-  return { element, getStyleElement };
+  // The streaming-compatible format: one <style data-rnw-group="G"> per
+  // compiler group, ascending. See ./getStyleElements.
+  const getStyleElements = (props) => {
+    recordStyleFormat('grouped');
+    return getStyleElementsImpl(props);
+  };
+  return { element, getStyleElement, getStyleElements };
 }

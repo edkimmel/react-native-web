@@ -1,16 +1,28 @@
 # This fork
 
-This is a fork of [React Native Web](https://necolas.github.io/react-native-web/) made to experiment with and add support for SSR Suspense.
+`@edkimmel/react-native-web` is a fork of [React Native Web](https://necolas.github.io/react-native-web/) that adds streaming-SSR and React Suspense support.
 
-The running changelog from this fork
+Upstream RNW compiles CSS at runtime into one process-wide sheet that is serialised once, after the render finishes. Under `renderToPipeableStream` that breaks twice over: a Suspense boundary resolving after `</head>` is on the wire compiles rules that have nowhere to go, and concurrent renders interleave through the same module-level state. This fork fixes both.
 
-- The ability to override Dimensions on both the server and browser, to keep the value in sync for SSR + Hydration
-- Fixing support for latest stylex
-- Fixing virtualization for lists with very large footers
-- AsyncLocalStorage scoping of Dimensions for concurrent SSR request isolation
-- ALS scoping of StyleSheets
-- Support for additional react-native-stylesheet elements, which will be appended to every suspense chunk returned by the server. This was implemented to prevent FOUC.
+**[Streaming SSR guide and API reference →](./STREAMING-SSR.md)**
 
+What it adds:
+
+- **Per-request scoping.** `runInRequestScope(fn)` wraps each SSR render so the CSS delta buffer, `Dimensions` and `Appearance` are isolated per request. `configureRequestScope({ AsyncLocalStorage })` is required on non-Node server runtimes. `getScopedState` / `getProcessState` / `hasRequestScope`, from `react-native-web/server`, let downstream SSR helpers use the same scope.
+- **A streaming stylesheet.** The server sheet streams as a shell — one `<style data-rnw-group="G">` per compiler group — followed by per-chunk deltas, each a single self-removing inline `<script>` that inserts its rules into the anchors' CSSOM at parse time and leaves no DOM node behind, so late Suspense boundaries arrive styled instead of causing a FOUC and `hydrateRoot(document, …)` still sees exactly the DOM React rendered. Exposed as `StyleSheet.takeShellHTML()` / `takeDeltaHTML()` / `takeShellGroups()`, as [`<StyleSheet.Anchors />`](./STREAMING-SSR.md#stylesheet-anchors) for a `<head>` that is itself inside the stream — which works from React 18.3.1 up, except for a boundary _above_ `<html>`/`<head>`, which needs **React >= 19.1** — and as `AppRegistry.getApplication().getStyleElements()`.
+- **One call for the whole server side.** `renderToStreamingResponse({ element, response, head, … })`, from `react-native-web/server`, opens the request scope, applies this request's device state, assembles the document around the stylesheet shell and the hydration snapshot, and pipes React into the response in the order the transform needs — so the orderings that fail silently are not the caller's to get right. See the [quickstart](./STREAMING-SSR.md#quickstart).
+- **A ready-made adapter.** Underneath it, `createStyleInjectionTransform({ prelude, epilogue, nonce })` returns a Node `stream.Transform` to pipe `renderToPipeableStream` through. Reach for it directly when React renders `<html>`/`<head>` itself, or when your framework owns the response.
+- **Per-request device state, with a hydration snapshot.** `Dimensions.set()` and `Appearance.set({ colorScheme })` on the server, and `react-native-web/server`'s `takeHydrationStateHTML()` to carry those values to the client as a `<script>`. `useWindowDimensions` and `useColorScheme` are built on `useSyncExternalStore`, so every Suspense boundary hydrates against the value the server rendered with, however late it hydrates. `registerHydrationState()` adds your own state to the same snapshot.
+- Support for latest StyleX.
+- A virtualization fix for lists with very large footers.
+
+Only `runInRequestScope` and `configureRequestScope` are added to the top-level barrel; everything that runs on the server rather than in the tree is behind `react-native-web/server`, and the rest hangs off the API it belongs to (`StyleSheet.Anchors`, `Dimensions.unstable_hydrationStore`).
+
+Everything is additive: an app that never calls these APIs behaves exactly as upstream does.
+
+**React 18.3.1 and every React 19 are supported. One shape has a higher floor: a Suspense boundary _above_ `<html>`/`<head>` needs React >= 19.1**, because it relies on Fizz's Suspense-aware preamble, which shipped in 19.1.0 and is in no 19.0.x release. A boundary _inside_ `<head>` needs no such thing and works from 18.3.1 up.
+
+Green in a real browser on all five of 18.3.1, 19.0.0, 19.1.1, 19.2.0 and 19.3.0 — 32 Playwright specs on Chromium covering the cascade in a live CSSOM, a per-painted-frame FOUC audit, hydration against the server snapshot, `hydrateRoot(document, …)` over a React-rendered `<head>`, and a `<head>` that is itself inside the stream. Rerun it yourself with `npm run e2e:matrix:all` from `packages/streaming-ssr-e2e/`; the runner reads the React that actually ran back out of the run output, so a green row cannot describe a version the harness quietly did not use. See [React version support](./STREAMING-SSR.md#react-version-support) and [real-browser coverage](./STREAMING-SSR.md#real-browser-coverage) for what that does and does not cover.
 
 # React Native for Web
 

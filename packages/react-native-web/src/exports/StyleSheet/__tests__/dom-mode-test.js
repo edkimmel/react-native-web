@@ -166,7 +166,20 @@ describe('createSheet mode detection', () => {
       const { createSheet } = require('../dom');
       // Relative order between an anchor set and a monolithic sheet is
       // undefined, so guessing would be worse than failing.
-      expect(() => createSheet()).toThrow(/both/);
+      const spy = jest.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        expect(() => createSheet()).toThrow(/both/);
+        // Reported as well as thrown. In the real world this runs at module
+        // scope of `exports/StyleSheet/index.js`, before any React root
+        // exists — so the exception is a module-evaluation failure and
+        // whoever loads the bundle decides what becomes of it (a dynamic
+        // `import()` behind `React.lazy` turns it into a boundary's generic
+        // "failed to load"). The console line is the half that cannot be
+        // swallowed.
+        expect(spy).toHaveBeenCalledWith(expect.stringContaining('both'));
+      } finally {
+        spy.mockRestore();
+      }
     });
   });
 });

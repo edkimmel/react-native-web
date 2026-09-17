@@ -334,10 +334,11 @@ export default function createOrderedCSSStyleSheet(
     /**
      * Like `insert`, but only updates the bookkeeping records — the rule is
      * NOT written into the primary CSSOM sheet. Used by the streaming-SSR
-     * client ingest path: a `<style data-rnw-delta="N">` element already
-     * carries the rule in the document, so the browser is already applying
-     * it; we just need RNW to know about it so subsequent runtime inserts
-     * dedup correctly.
+     * client ingest path: a streamed chunk's inline script already put the
+     * rule into a `<head>` anchor's CSSOM (or, from an older server, into
+     * its own `<style data-rnw-delta="N">` element), so the browser is
+     * already applying it; we just need RNW to know about it so subsequent
+     * runtime inserts dedup correctly.
      */
     registerExisting(cssText: string, groupValue: number): InsertResult {
       const group = Number(groupValue);

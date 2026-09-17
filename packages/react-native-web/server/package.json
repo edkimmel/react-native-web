@@ -1,0 +1,6 @@
+{
+  "description": "Fallback shim for toolchains that do not read the package's `exports` map. `react-native-web/server` resolves through `exports` (see the `./server` key in ../package.json): that is the only mechanism Node's ESM resolver honours for a bare-specifier subpath, and without it `import ... from 'react-native-web/server'` fails with ERR_UNSUPPORTED_DIR_IMPORT. This directory keeps the pre-`exports` main/module/browser shape so that an `exports`-unaware resolver still finds the same three targets. Keep the three fields in step with the `./server` conditions. The entry itself is documented in src/server/index.js.",
+  "main": "../dist/cjs/server/index.js",
+  "module": "../dist/server/index.js",
+  "browser": "../dist/server/index.js"
+}

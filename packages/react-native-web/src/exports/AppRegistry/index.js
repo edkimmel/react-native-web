@@ -11,6 +11,7 @@
 'use client';
 
 import type { Application } from './renderApplication';
+import type { StyleElementProps } from './getStyleElements';
 import type { ComponentType, Node } from 'react';
 
 import invariant from 'fbjs/lib/invariant';
@@ -18,11 +19,16 @@ import unmountComponentAtNode from '../unmountComponentAtNode';
 import renderApplication, { getApplication } from './renderApplication';
 
 type AppParams = Object;
+type ApplicationSSR = {|
+  element: Node,
+  // Upstream's single <style id="react-native-stylesheet">.
+  getStyleElement: (any) => Node,
+  // The fork's streaming-compatible format: one <style data-rnw-group="G">
+  // per compiler group, ascending. Mutually exclusive with the above.
+  getStyleElements: (?StyleElementProps) => Array<Node>
+|};
 type Runnable = {|
-  getApplication?: (AppParams) => {|
-    element: Node,
-    getStyleElement: (any) => Node
-  |},
+  getApplication?: (AppParams) => ApplicationSSR,
   run: (AppParams) => any
 |};
 
@@ -57,7 +63,7 @@ export default class AppRegistry {
   static getApplication(
     appKey: string,
     appParameters?: AppParams
-  ): {| element: Node, getStyleElement: (any) => Node |} {
+  ): ApplicationSSR {
     invariant(
       runnables[appKey] && runnables[appKey].getApplication,
       `Application ${appKey} has not been registered. ` +

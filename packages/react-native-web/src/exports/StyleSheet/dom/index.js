@@ -16,6 +16,7 @@ import createCSSStyleSheet, {
   createGroupSheetResolver,
   createGroupStyleElement,
   findGroupElements,
+  findGroupStyleElement,
   groupAttr
 } from './createCSSStyleSheet';
 import createOrderedCSSStyleSheet from './createOrderedCSSStyleSheet';
@@ -33,6 +34,11 @@ const defaultId = 'react-native-stylesheet';
 // Initial hydration scans these so the dedup map / groups records reflect
 // every rule that is already present in the document, regardless of which
 // `<style>` element it physically lives in.
+//
+// RNW no longer *emits* this format — a node React did not render skews
+// `hydrateRoot(document, …)`, so `takeDeltaHTML` writes into the anchors'
+// CSSOM instead — but a client bundle can be newer than the server that
+// rendered the page it boots into, so the reading side stays.
 const deltaAttr = 'data-rnw-delta';
 const roots = new WeakMap<Node, number>();
 const sheets = [];
@@ -62,19 +68,39 @@ function detectMode(
   const hasGrouped = rootNode.querySelector(`style[${groupAttr}]`) != null;
   const hasLegacy = rootNode.getElementById(id) != null;
   if (hasGrouped && hasLegacy && process.env.NODE_ENV !== 'production') {
-    throw new Error(
+    const message =
       'react-native-web: the document contains both per-group ' +
-        `<style ${groupAttr}> elements and a <style id="${id}"> element. ` +
-        'Their relative cascade order is undefined, so this is never safe. ' +
-        'Emit either StyleSheet.takeShellHTML() or ' +
-        'AppRegistry.getApplication().getStyleElement(), not both.'
-    );
+      `<style ${groupAttr}> elements and a <style id="${id}"> element. ` +
+      'Their relative cascade order is undefined, so this is never safe. ' +
+      'Emit either StyleSheet.takeShellHTML() or ' +
+      'AppRegistry.getApplication().getStyleElement(), not both.';
+    // Reported *and* thrown. The throw is the behaviour — guessing an order
+    // is worse than stopping — but this runs inside `createSheet()`, which
+    // runs at module scope of `exports/StyleSheet/index.js`, before any
+    // React root exists. So the exception is a module-evaluation failure,
+    // and whoever is loading the bundle decides what happens to it: a
+    // dynamic `import()` behind `React.lazy` turns it into a boundary's
+    // generic "failed to load", and some dev servers report only the
+    // request that failed. The console line is the half that cannot be
+    // swallowed, and it is the half that names the cause.
+    console.error(message);
+    throw new Error(message);
   }
   if (hasGrouped) return 'grouped';
   if (hasLegacy) return 'legacy';
   return 'grouped';
 }
 
+/**
+ * The `[group, CSSStyleSheet]` pairs to hydrate the bookkeeping from.
+ *
+ * Load-bearing: this reads each element's live `sheet`, not its text. A
+ * streamed chunk that landed before RNW booted put its rules into the
+ * anchor's CSSOM with `insertRule`, which never writes back to the
+ * element's text — so `cssRules` is the only place those rules can be
+ * seen, and reading it is what makes the delta queue an optimisation
+ * rather than a correctness requirement at boot.
+ */
 function collectGroupSheets(
   rootNode: Document | ShadowRoot
 ): Array<[number, CSSStyleSheet]> {
@@ -96,6 +122,10 @@ function createGroupedSheet(
   });
 }
 
+// Legacy only. Grouped mode gets these through `collectGroupSheets`, and
+// the current wire format emits no `<style data-rnw-delta>` at all; this
+// covers a document from an older server that also used upstream's single
+// `<style id>` sheet.
 function collectDeltaSheets(
   rootNode: Document | ShadowRoot
 ): Array<CSSStyleSheet> {
@@ -153,12 +183,28 @@ export function createSheet(
       });
       roots.set(rootNode, sheets.length);
       sheets.push(sheet);
-      // Install the global ingest hook so any `<style data-rnw-delta>`
-      // elements that stream into the document AFTER this point — when
-      // suspense boundaries resolve and React commits their chunk —
-      // also get registered into the bookkeeping. The hook also drains
-      // any IDs that arrived in window.__RNW_DELTA__ before RNW booted.
-      installDeltaIngest(sheets);
+      // Install the global ingest hook so any delta that streams into the
+      // document AFTER this point — when suspense boundaries resolve and
+      // React commits their chunk — also gets registered into the
+      // bookkeeping. The hook also drains anything that arrived in
+      // window.__RNW_DELTA__ before RNW booted, though those rules were
+      // already picked up from the anchors' cssRules just above; the
+      // queue is what covers the chunks that come later.
+      //
+      // The predicate is how a chunk that ran before its anchor existed —
+      // possible once the app renders `<head>` through React with a
+      // Suspense boundary in it — gets applied at the right moment instead
+      // of conjuring a `<style>` React never rendered. It asks for a SHELL
+      // anchor specifically: an anchor RNW created for itself a moment ago
+      // sits wherever `<head>` happened to allow, which is not the cascade
+      // bucket the chunk's rules belong in. In legacy mode there is one
+      // sheet and it always exists, so the question is moot.
+      installDeltaIngest(
+        sheets,
+        isGroupedMode && docNode != null
+          ? (group) => findGroupStyleElement(group, docNode, true) != null
+          : null
+      );
     } else {
       const index = roots.get(rootNode);
       if (index == null) {

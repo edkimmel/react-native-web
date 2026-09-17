@@ -72,14 +72,17 @@ export { default as useWindowDimensions } from './exports/useWindowDimensions';
 // SSR per-request scoping. Server entrypoints wrap each render in
 // `runInRequestScope` so module-level state inside RNW (the cumulative
 // StyleSheet, the per-request delta buffer) is isolated per request.
-// `getScopedState`, `getProcessState` and `hasRequestScope` let downstream
-// SSR helpers register their own per-request state behind the same scope.
 // `configureRequestScope` supplies an `AsyncLocalStorage` on server runtimes
 // where `node:async_hooks` is not statically importable.
+//
+// These two are the only additions to this barrel, because they are the only
+// ones the app calls where it renders rather than where it serves:
+// `runInRequestScope` wraps the render and everything else is called inside
+// it. The rest of the SSR surface — the stream transform, the hydration
+// payload, and the scoped-state accessors downstream helpers build on — is
+// `react-native-web/server`, so importing `View` no longer drags the Node
+// stream path's browser stand-in along with it.
 export {
   configureRequestScope,
-  getProcessState,
-  getScopedState,
-  hasRequestScope,
   runInRequestScope
 } from './modules/asyncContext';

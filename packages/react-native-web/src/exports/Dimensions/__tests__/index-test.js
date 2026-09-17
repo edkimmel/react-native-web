@@ -55,8 +55,8 @@ describe('apis/Dimensions', () => {
     expect(handler).toHaveBeenCalledTimes(0);
   });
 
-  test('unsafe_setForHydration values survive a resize', () => {
-    Dimensions.unsafe_setForHydration({
+  test('unstable_setForHydration values survive a resize', () => {
+    Dimensions.unstable_setForHydration({
       window: { fontScale: 1, height: 700, scale: 1, width: 360 },
       screen: { fontScale: 1, height: 800, scale: 1, width: 360 }
     });
@@ -68,7 +68,7 @@ describe('apis/Dimensions', () => {
     expect(Dimensions.get('window').width).toBe(360);
     expect(Dimensions.get('screen').height).toBe(800);
 
-    Dimensions.unsafe_restoreFromHydration();
+    Dimensions.unstable_restoreFromHydration();
     expect(Dimensions.get('window').width).toBe(1024);
     expect(Dimensions.get('window').height).toBe(768);
   });

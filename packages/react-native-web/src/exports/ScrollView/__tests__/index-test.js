@@ -1,7 +1,6 @@
 import React from 'react';
 import ScrollView from '../';
 import { createEventTarget } from 'dom-event-testing-library';
-import { findDOMNode } from 'react-dom';
 import { act, render } from '@testing-library/react';
 
 describe('components/ScrollView', () => {
@@ -30,7 +29,11 @@ describe('components/ScrollView', () => {
           <ScrollView onScroll={onScroll} ref={ref} scrollEventThrottle={16} />
         );
       });
-      const target = createEventTarget(findDOMNode(ref.current));
+      // `ref.current` is already the host node — the "node has imperative
+      // methods" test below asserts it is an HTMLElement with tagName DIV —
+      // so the `findDOMNode` this used to go through was a passthrough. It
+      // was also removed from react-dom in React 19.
+      const target = createEventTarget(ref.current);
       act(() => {
         target.scroll();
         target.scroll();

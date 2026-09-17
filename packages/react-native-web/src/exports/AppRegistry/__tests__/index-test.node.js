@@ -5,6 +5,7 @@
  * LICENSE file in the root directory of this source tree.
  */
 
+import AppContainer from '../AppContainer';
 import AppRegistry from '..';
 import React from 'react';
 import ReactDOMServer from 'react-dom/server';
@@ -31,13 +32,27 @@ describe('AppRegistry', () => {
         getStyleElement()
       );
 
-      expect(element).toMatchInlineSnapshot(`
-        <AppContainer
-          rootTag={{}}
-        >
-          <NoopComponent />
-        </AppContainer>
-      `);
+      // Asserted structurally rather than as an inline element snapshot.
+      // pretty-format's ReactElement plugin decides what it is looking at via
+      // `react-is`, and the hoisted react-is (17.x) only knows the
+      // Symbol.for('react.element') brand. React 19 renamed it to
+      // Symbol.for('react.transitional.element'), so under React 19 the
+      // element falls through to the generic object serializer and the
+      // snapshot fails for reasons that have nothing to do with this code.
+      // These assertions pin the same facts the snapshot did.
+      expect(element.type).toBe(AppContainer);
+      expect(element.type.displayName).toBe('AppContainer');
+      expect(element.props.rootTag).toEqual({});
+      expect(element.props.WrapperComponent).toBeUndefined();
+      expect(element.props.children.type).toBe(NoopComponent);
+      // The half the snapshot gave for free and a list of `expect`s does
+      // not: ABSENCE. A snapshot fails when a prop is added; individual
+      // assertions do not, so the prop set is pinned explicitly.
+      expect(Object.keys(element.props).sort()).toEqual([
+        'WrapperComponent',
+        'children',
+        'rootTag'
+      ]);
       expect(styleElement).toMatchInlineSnapshot(`
         "<style id="react-native-stylesheet">[stylesheet-group="0"]{}
         body{margin:0;}
