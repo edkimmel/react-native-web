@@ -128,7 +128,7 @@ function LateView({ style }) {
  * before the CSS exists. See "Rendering <head> through React" in
  * STREAMING-SSR.md.
  */
-function Document({ children, fallback, title }) {
+function Document({ children, title }) {
   return (
     <html lang="en">
       <head>
@@ -140,9 +140,7 @@ function Document({ children, fallback, title }) {
         <StyleSheet.Anchors />
       </head>
       <body>
-        <div id="app">
-          <Suspense fallback={fallback}>{children}</Suspense>
-        </div>
+        <div id="app">{children}</div>
       </body>
     </html>
   );
@@ -157,8 +155,10 @@ describe('renderToStreamingResponse({ renderDocument: true })', () => {
 
     renderToStreamingResponse({
       element: (
-        <Document fallback={<View />} title="Doc">
-          <Late />
+        <Document title="Doc">
+          <Suspense fallback={<View />}>
+            <Late />
+          </Suspense>
         </Document>
       ),
       renderDocument: true,
@@ -253,8 +253,10 @@ describe('renderToStreamingResponse({ renderDocument: true })', () => {
 
     renderToStreamingResponse({
       element: (
-        <Document fallback={<View />} title="Delta">
-          <Early />
+        <Document title="Delta">
+          <Suspense fallback={<View />}>
+            <Early />
+          </Suspense>
           <Suspense fallback={<View />}>
             <Late />
           </Suspense>
@@ -293,8 +295,10 @@ describe('renderToStreamingResponse({ renderDocument: true })', () => {
 
     renderToStreamingResponse({
       element: (
-        <Document fallback={<View />} title="Nonce">
-          <Late />
+        <Document title="Nonce">
+          <Suspense fallback={<View />}>
+            <Late />
+          </Suspense>
         </Document>
       ),
       nonce: 'abc123',
@@ -312,7 +316,7 @@ describe('renderToStreamingResponse({ renderDocument: true })', () => {
     // Ignoring these is the failure this throw exists for: a `head` that
     // goes nowhere is a <title> missing from a page that still returns 200.
     const base = {
-      element: <Document fallback={null} title="x" />,
+      element: <Document title="x" />,
       renderDocument: true,
       response: createResponse()
     };
