@@ -1,0 +1,13 @@
+{
+  "private": true,
+  "name": "streaming-ssr-e2e",
+  "description": "Real-browser (Playwright) harness for the streaming-SSR additions in @edkimmel/react-native-web. Deliberately NOT a workspace: it consumes the built dist the way a consumer would.",
+  "scripts": {
+    "e2e": "playwright test --config ./playwright.config.js",
+    "e2e:headed": "playwright test --config ./playwright.config.js --headed",
+    "e2e:ui": "playwright test --config ./playwright.config.js --ui",
+    "e2e:matrix": "node ./scripts/react-version-matrix.js",
+    "e2e:matrix:all": "node ./scripts/react-version-matrix.js --all",
+    "start": "node ./server.js"
+  }
+}
