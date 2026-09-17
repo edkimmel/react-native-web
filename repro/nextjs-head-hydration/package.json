@@ -1,0 +1,17 @@
+{
+  "name": "nextjs-head-hydration-repro",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Minimal Next.js App Router reproduction probing where out-of-band DOM nodes skew document-level React hydration.",
+  "scripts": {
+    "dev": "next dev -p 3311",
+    "build": "next build",
+    "start": "next start -p 3311",
+    "probe": "node scripts/run-probe.js"
+  },
+  "dependencies": {
+    "next": "16.3.4",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  }
+}
